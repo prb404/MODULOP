@@ -1,0 +1,50 @@
+{
+  "id": "gardner-multiple-intelligences",
+  "version": "3.0.0",
+  "category": "tests-questionnaires",
+  "label": "Mes huit terrains de jeu",
+  "source": {
+    "type": "workbook-adaptation",
+    "file": "test intelligences gardner.xlsx",
+    "items": 72,
+    "dimensions": 8,
+    "itemsPerDimension": 9
+  },
+  "questionnaire": {
+    "responseType": "boolean",
+    "pageSize": 9,
+    "scoring": "count-selected-by-dimension",
+    "editor": "sequenced-cards",
+    "contentFirst": true
+  },
+  "layout": {
+    "default": { "colSpan": 8, "rowSpan": 5 },
+    "min": { "colSpan": 4, "rowSpan": 4 },
+    "max": { "colSpan": 12, "rowSpan": 8 }
+  },
+  "renderers": [
+    {
+      "id": "radar",
+      "label": "Carte",
+      "engine": "echarts",
+      "chartType": "radar"
+    },
+    {
+      "id": "bars",
+      "label": "Spectre",
+      "engine": "echarts",
+      "chartType": "bar"
+    },
+    {
+      "id": "orbit",
+      "label": "Rosace",
+      "engine": "echarts",
+      "chartType": "pie",
+      "options": { "roseType": "radius" }
+    }
+  ],
+  "feedback": {
+    "strategy": "relative-top-three",
+    "visibleCallToAction": false
+  }
+}

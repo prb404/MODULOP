@@ -1,0 +1,1219 @@
+import "gridstack/dist/gridstack.min.css";
+import "./styles.css";
+import { toBlob } from "html-to-image";
+import { createModule, generateProfileName, moduleCatalog } from "./core/profile.js";
+import { ProfileStore, db, resolveAsset } from "./core/store.js";
+import { exportJsonProfile, exportZipProfile, importProfile } from "./core/portable.js";
+import { renderModuleContent, mountModule, destroyModule, escapeHtml } from "./renderers/index.js";
+import { editorBody, mountEditor, destroyEditor, assessmentBody, mountAssessment, appearanceBody, mountAppearanceEditor } from "./editors/index.js";
+import { icon, iconButton } from "./ui/icons.js";
+import { bindTooltips } from "./ui/tooltip.js";
+import { PanelManager } from "./ui/panel-manager.js";
+import { confirmAt } from "./ui/confirm.js";
+import { activateCustomAtmosphere, activeAtmosphere, applyAtmosphere, contrastRatio, createDefaultAtmospheres } from "./core/atmospheres.js";
+import { listFonts, loadFonts } from "./core/fonts.js";
+import { GridStackManager } from "./ui/gridstack-manager.js";
+import { overlays } from "./ui/overlay-manager.js";
+import { remoteResources } from "./core/remote-resources.js";
+import { visualPickerField, bindVisualPickers, visualPreview } from "./ui/visual-picker.js";
+import { ControlRegistry, choiceCards, consentControl, disclosure, switchControl } from "./ui/controls.js";
+import { renderField } from "./fields/index.js";
+import { MorphologyEngine, lockMorphologySection } from "./core/morphology.js";
+import { creditsMarkdown } from "./core/component-sources.js";
+import { initialsAvatar } from "./core/visuals.js";
+import { appVersion } from "./core/version.js";
+import DOMPurify from "dompurify";
+import { marked } from "marked";
+
+const appRoot = document.querySelector("#app");
+const store = new ProfileStore();
+const morphologyEngine = new MorphologyEngine();
+
+class ModulopApp {
+  constructor(root, state) {
+    this.root = root;
+    this.store = state;
+    this.panel = null;
+    this.selectedId = null;
+    this.menuFor = null;
+    this.toastTimer = null;
+    this.renderedModules = new Map();
+    this.panelManager = null;
+    this.gridManager = null;
+    this.pendingInsertion = null;
+    this.insertionModeId = null;
+    this.longPressTimer = null;
+    this.longPressOrigin = null;
+    this.suppressActivationClickId = null;
+    this.menuCleanup = null;
+    this.hasHydratedGrid = false;
+    this.identityEditing = false;
+    const params = new URLSearchParams(location.search);
+    this.homeVisible = params.has("home") || (!params.has("template") && !params.has("profile"));
+    this.consentFilter = "active";
+    this.lastScrollY = 0;
+    this.resizeTimer = null;
+    this.dragDepth = 0;
+    this.store.addEventListener("status", (event) => this.updateSaveState(event.detail));
+  }
+
+  async init() {
+    this.root.innerHTML = `
+      <div class="grain" aria-hidden="true"></div>
+      <header class="profile-header" data-profile-header>
+        <button class="profile-header__identity" type="button" data-action="open-menu" aria-label="Modifier l’identité du profil">
+          <span class="profile-avatar" data-profile-avatar></span>
+          <strong data-profile-name></strong>
+        </button>
+        <button class="profile-header__menu" type="button" data-action="open-menu" data-tooltip="Ouvrir le menu" aria-label="Ouvrir le menu">${icon("Menu")}</button>
+      </header>
+      <main class="workspace"><section class="welcome-screen" data-home hidden></section><section class="module-grid" id="module-grid"></section></main>
+      <footer class="footer"><span>MODULOP ${appVersion.display}</span><button type="button" data-action="open-about">À propos</button></footer>
+      <div id="panel-host"></div>
+      <div id="global-tooltip" class="tooltip" role="tooltip" hidden></div>
+      <div class="toast" role="status" aria-live="polite"></div>
+      <div class="drop-overlay" data-drop-overlay hidden><div>${icon("FileArchive", 34)}<strong>Déposez votre fichier MODULOP</strong><span>.json, .zip ou .modulop.zip</span></div></div>
+      <div class="sr-only" data-grid-announcer aria-live="assertive"></div>
+      <input id="import-input" type="file" accept=".json,.zip,.modulop.zip,application/json,application/zip" hidden>`;
+    this.panelManager = new PanelManager({
+      host: this.root.querySelector("#panel-host"),
+      getPreferences: (type) => this.store.profile.uiPreferences.panels[type] || {},
+      savePreferences: (type, values, rerender = true) => {
+        this.store.mutate((profile) => Object.assign(profile.uiPreferences.panels[type] ||= {}, values), { history: false });
+        if (rerender) this.renderPanel();
+      },
+      onClose: () => this.closePanel()
+    });
+    this.bindGlobal();
+    this.bindStickyHeader();
+    this.gridManager = new GridStackManager({
+      element: this.root.querySelector("#module-grid"),
+      onLayout: (layouts) => this.saveGridLayout(layouts),
+      announce: (message) => this.announce(message)
+    });
+    await this.gridManager.init();
+    await this.applyTemplateFromUrl();
+    await this.renderWorkspace();
+  }
+
+  async applyTemplateFromUrl() {
+    const params = new URLSearchParams(location.search);
+    const template = params.get("template");
+    const profileId = params.get("profile");
+    if (profileId) {
+      await this.store.openSpace(profileId);
+      this.resetRenderedGrid();
+    } else if (template) {
+      await this.store.createSpace(template);
+      this.resetRenderedGrid();
+    }
+  }
+
+  bindGlobal() {
+    this.root.addEventListener("click", (event) => this.handleAction(event));
+    this.root.addEventListener("click", (event) => this.handleModuleActivation(event));
+    this.root.addEventListener("pointerdown", (event) => this.beginLongPress(event));
+    this.root.addEventListener("pointermove", (event) => this.trackLongPress(event));
+    this.root.addEventListener("pointerup", () => this.cancelLongPress());
+    this.root.addEventListener("pointercancel", () => this.cancelLongPress());
+    this.root.querySelector("#import-input").addEventListener("change", (event) => this.handleImport(event));
+    this.bindGlobalDrop();
+    window.addEventListener("resize", () => {
+      clearTimeout(this.resizeTimer);
+      this.resizeTimer = setTimeout(() => this.syncResponsiveLayout(), 120);
+    }, { passive: true });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && event.target.matches?.(".module") && !event.target.closest("button,a,input,textarea,select,[contenteditable]")) {
+        event.preventDefault();
+        this.setInsertionMode(event.target.dataset.moduleId);
+      }
+      if (event.key === "Escape" && this.insertionModeId) {
+        event.preventDefault();
+        this.setInsertionMode(null);
+      }
+      if (event.key === "Escape" && this.menuFor) {
+        this.menuFor = null;
+        this.syncOverflowMenus();
+      }
+      if (event.ctrlKey && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        event.shiftKey ? this.store.redo() : this.store.undo();
+        this.renderWorkspace();
+      }
+    });
+    document.addEventListener("pointerdown", (event) => {
+      if (!this.menuFor || event.target.closest(".module-overflow, [data-action='module-menu']")) return;
+      this.menuFor = null;
+      this.syncOverflowMenus();
+    }, true);
+  }
+
+  bindGlobalDrop() {
+    const overlay = () => this.root.querySelector("[data-drop-overlay]");
+    const valid = (event) => Array.from(event.dataTransfer?.items || []).some((item) => item.kind === "file");
+    window.addEventListener("dragenter", (event) => {
+      if (!valid(event)) return;
+      this.dragDepth += 1;
+      overlay().hidden = false;
+    });
+    window.addEventListener("dragover", (event) => {
+      if (!valid(event)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+    });
+    window.addEventListener("dragleave", () => {
+      this.dragDepth = Math.max(0, this.dragDepth - 1);
+      if (!this.dragDepth) overlay().hidden = true;
+    });
+    window.addEventListener("drop", async (event) => {
+      const [file] = Array.from(event.dataTransfer?.files || []).filter(isPortableFile);
+      if (!file) return;
+      event.preventDefault();
+      this.dragDepth = 0;
+      overlay().hidden = true;
+      await this.importFile(file, { anchor: overlay(), fromDrop: true });
+    });
+  }
+
+  bindStickyHeader() {
+    const sync = () => {
+      const atmosphere = activeAtmosphere(this.store.profile);
+      const mode = atmosphere?.header?.mode || "reveal";
+      const y = window.scrollY;
+      const expanded = mode === "always" || (mode === "reveal" && y > 120);
+      const header = this.root.querySelector("[data-profile-header]");
+      header?.classList.toggle("is-expanded", expanded);
+      header?.classList.toggle("is-compact", !expanded);
+      this.lastScrollY = y;
+    };
+    window.addEventListener("scroll", sync, { passive: true });
+    sync();
+  }
+
+  handleModuleActivation(event) {
+    if (event.target.closest("[data-action],a,button,input,textarea,select,[contenteditable],.ui-resizable-handle")) return;
+    const module = event.target.closest(".module");
+    if (module) {
+      if (this.suppressActivationClickId === module.dataset.moduleId) {
+        this.suppressActivationClickId = null;
+        return;
+      }
+      this.setInsertionMode(module.dataset.moduleId);
+      return;
+    }
+    if (!event.target.closest(".grid-insertions")) this.setInsertionMode(null);
+  }
+
+  beginLongPress(event) {
+    if (event.pointerType === "mouse" || event.target.closest("[data-action],a,button,input,textarea,select,[contenteditable],.ui-resizable-handle")) return;
+    const module = event.target.closest(".module");
+    if (!module) return;
+    this.cancelLongPress();
+    this.longPressOrigin = { x: event.clientX, y: event.clientY };
+    this.longPressTimer = setTimeout(() => {
+      this.suppressActivationClickId = module.dataset.moduleId;
+      this.setInsertionMode(module.dataset.moduleId);
+      navigator.vibrate?.(12);
+      this.longPressTimer = null;
+    }, 460);
+  }
+
+  trackLongPress(event) {
+    if (!this.longPressTimer || !this.longPressOrigin) return;
+    if (Math.hypot(event.clientX - this.longPressOrigin.x, event.clientY - this.longPressOrigin.y) > 10) this.cancelLongPress();
+  }
+
+  cancelLongPress() {
+    clearTimeout(this.longPressTimer);
+    this.longPressTimer = null;
+    this.longPressOrigin = null;
+  }
+
+  setInsertionMode(id) {
+    const next = id && this.insertionModeId !== id ? id : null;
+    this.insertionModeId = next;
+    for (const [moduleId, record] of this.renderedModules) {
+      const active = moduleId === next;
+      record.widget.classList.toggle("is-insertion-active", active);
+      record.element.setAttribute("aria-expanded", String(active));
+    }
+    if (next) this.announce("Mode ajout activé. Choisissez une direction autour du fragment.");
+  }
+
+  syncResponsiveLayout() {
+    for (const module of this.store.profile.modules) {
+      this.gridManager?.updateWidget(this.renderedModules.get(module.id)?.widget, module.layout);
+    }
+  }
+
+  async renderWorkspace() {
+    await applyAtmosphere(this.store.profile);
+    await this.renderHome();
+    const identity = this.store.profile.identity;
+    this.root.querySelector("[data-profile-name]").textContent = identity.name;
+    this.root.querySelector("[data-profile-avatar]").innerHTML = visualPreview(identity.avatar);
+    await this.resolveAssets(this.root.querySelector("[data-profile-avatar]"));
+    const grid = this.root.querySelector("#module-grid");
+    for (const [id, record] of this.renderedModules) {
+      const next = this.store.profile.modules.find((item) => item.id === id);
+      if (!next) {
+        destroyModule(record.module, record.element);
+        this.gridManager.removeWidget(record.widget);
+        this.renderedModules.delete(id);
+      }
+    }
+    for (const module of this.store.profile.modules) await this.upsertModule(module, grid);
+    if (!this.hasHydratedGrid) {
+      this.gridManager.compact();
+      this.hasHydratedGrid = true;
+    }
+    this.bindContentInteractions();
+    bindTooltips(this.root);
+  }
+
+  async renderHome() {
+    const home = this.root.querySelector("[data-home]");
+    const grid = this.root.querySelector("#module-grid");
+    if (!home) return;
+    home.hidden = !this.homeVisible;
+    grid.hidden = this.homeVisible;
+    if (!this.homeVisible) return;
+    const spaces = await this.store.profiles();
+    home.innerHTML = `<section class="welcome-hero welcome-hero--compact">
+      <h1>Vos espaces modulaires.</h1>
+      <p>Ouvrez un espace, importez un paquet ou démarrez depuis un modèle.</p>
+    </section>
+    <section class="welcome-section welcome-section--spaces">
+      <h2>Espaces locaux</h2>
+      <div class="space-list">${spaces.map((space) => `<article class="space-card"><button type="button" data-action="open-space" data-profile-id="${space.id}">
+        <span>${visualPreview(space.identity?.avatar)}</span><strong>${escapeHtml(space.identity?.name || "Profil")}</strong>
+        <small>${escapeHtml(space.template || "custom")} · ${space.moduleCount || 0} fragments · ${new Date(space.updatedAt).toLocaleDateString("fr-FR")}</small>
+      </button><button type="button" data-action="delete-space" data-profile-id="${space.id}" aria-label="Supprimer cet espace">${icon("Trash2", 16)}</button></article>`).join("") || `<p class="empty-spaces">Aucun espace local pour le moment.</p>`}</div>
+    </section>
+    <section class="welcome-import" data-action="import">
+      <span>${icon("FileUp", 24)}</span><strong>Importer un profil ou paquet</strong><small>Glissez-déposez un .json, .zip ou .modulop.zip, ou cliquez pour sélectionner un fichier.</small>
+    </section>
+    <section class="welcome-section">
+      <h2>Nouveau départ</h2>
+      <div class="template-grid">${profileTemplates().map((template) => `<button type="button" data-action="create-space" data-template="${template.id}">
+        <span>${icon(template.icon, 20)}</span><strong>${template.label}</strong><small>${template.description}</small>
+      </button>`).join("")}</div>
+    </section>`;
+    await this.resolveAssets(home);
+  }
+
+  async upsertModule(module, grid) {
+    const old = this.renderedModules.get(module.id);
+    if (old) destroyModule(old.module, old.element);
+    const element = old?.element || document.createElement("article");
+    const widget = old?.widget || document.createElement("div");
+    if (!old) {
+      widget.className = "grid-stack-item";
+      widget.dataset.moduleId = module.id;
+      widget.dataset.moduleType = module.type;
+      const content = document.createElement("div");
+      content.className = "grid-stack-item-content";
+      content.append(element);
+      widget.append(content);
+      widget.append(createInsertionControls(module));
+      this.gridManager.addWidget(widget, module.layout);
+    }
+    element.className = `module module--${module.type}`;
+    element.dataset.moduleId = module.id;
+    element.tabIndex = 0;
+    applyModulePresentation(element, module.presentation?.options || {});
+    const definition = moduleCatalog.find((item) => item.type === module.type);
+    element.innerHTML = `
+      ${module.type === "rich-text" ? "" : `<header class="module__header" title="Maintenir et déplacer"><span>${icon(definition?.icon || "Box", 16)}</span><h2>${escapeHtml(module.title)}</h2></header>`}
+      <div class="module__content">${renderModuleContent(module)}</div>
+      <div class="module-tools" aria-label="Actions pour ${escapeHtml(module.title)}">
+        ${isAssessmentModule(module) ? iconButton({ icon: "ListChecks", label: `Passer ${module.title}`, action: "take-assessment", id: module.id }) : iconButton({ icon: "Pencil", label: `Modifier ${module.title}`, action: "edit-module", id: module.id })}
+        ${iconButton({ icon: "Copy", label: `Copier ${module.title} comme image`, action: "copy-module", id: module.id })}
+        ${iconButton({ icon: "Ellipsis", label: "Plus d’actions", action: "module-menu", id: module.id })}
+        <div class="module-overflow" data-menu-for="${module.id}" hidden>
+          ${isAssessmentModule(module) ? `<button type="button" data-action="edit-module" data-id="${module.id}">${icon("FilePenLine", 16)} Modifier le test</button>` : ""}
+          <button type="button" data-action="customize-module" data-id="${module.id}">${icon("Palette", 16)} Personnaliser</button>
+          <button type="button" data-action="surprise-module" data-id="${module.id}">${icon("Sparkles", 16)} Surprenez-moi</button>
+          <button type="button" data-action="unlock-module" data-id="${module.id}">${icon("Unlock", 16)} Déverrouiller</button>
+          <button type="button" data-action="delete-module" data-id="${module.id}">${icon("Trash2", 16)} Supprimer</button>
+        </div>
+      </div>
+      </div>`;
+    const insertions = widget.querySelector(".grid-insertions");
+    insertions?.setAttribute("aria-label", `Ajouter près de ${module.title}`);
+    this.renderedModules.set(module.id, { module: structuredClone(module), element, widget });
+    element.dataset.loadState = "loading";
+    element.dataset.loadProgress = "0";
+    element.style.setProperty("--load-progress", "0");
+    try {
+      element.dataset.loadProgress = "35";
+      element.style.setProperty("--load-progress", "35");
+      await mountModule(module, element);
+      element.dataset.loadProgress = "85";
+      element.style.setProperty("--load-progress", "85");
+      await this.resolveAssets(element);
+      requestAnimationFrame(() => {
+        element.dataset.loadProgress = "100";
+        element.style.setProperty("--load-progress", "100");
+        element.dataset.loadState = "ready";
+      });
+    } catch (error) {
+      console.error(`Échec du renderer ${module.type}`, error);
+      element.dataset.loadState = "error";
+      element.querySelector(".module__content")?.insertAdjacentHTML("beforeend", `<div class="module-error">Le moteur n’a pas pu terminer le rendu.</div>`);
+    }
+  }
+
+  async resolveAssets(root) {
+    const placeholders = [...root.querySelectorAll("[data-asset]")].map(async (target) => {
+      const url = await resolveAsset(target.dataset.asset);
+      if (url) target.innerHTML = `<img src="${url}" alt="">`;
+    });
+    const markdownImages = [...root.querySelectorAll('img[src^="asset://"]')].map(async (image) => {
+      const url = await resolveAsset(image.getAttribute("src"));
+      if (url) image.src = url;
+    });
+    await Promise.all([...placeholders, ...markdownImages]);
+  }
+
+  async patchModule(id, mutator, rerenderPanel = false) {
+    this.store.mutate((profile) => {
+      const module = profile.modules.find((item) => item.id === id);
+      if (module) {
+        const presentationBefore = JSON.stringify(module.presentation);
+        const variantBefore = module.variant;
+        mutator(module);
+        if (presentationBefore !== JSON.stringify(module.presentation)) lockMorphologySection(profile, id, "presentation");
+        if (variantBefore !== module.variant) lockMorphologySection(profile, id, "variant");
+      }
+    });
+    const module = this.store.profile.modules.find((item) => item.id === id);
+    if (module) {
+      await loadFonts([module.presentation?.options?.fontFamily].filter(Boolean));
+      await this.upsertModule(module, this.root.querySelector("#module-grid"));
+    }
+    if (rerenderPanel) this.renderPanel();
+    this.updateSaveState("saving");
+  }
+
+  async handleAction(event) {
+    const button = event.target.closest("[data-action]");
+    if (!button) return;
+    const { action, id } = button.dataset;
+    if (action === "open-menu") this.openPanel("menu");
+    if (action === "open-about") this.openPanel("about");
+    if (action === "open-consents") {
+      this.consentFilter = button.dataset.filter || this.consentFilter || "active";
+      this.openPanel("consents");
+    }
+    if (action === "show-home") {
+      this.homeVisible = true;
+      this.closePanel();
+      await this.renderWorkspace();
+      history.pushState(null, "", `${location.pathname}?home=1`);
+    }
+    if (action === "create-space") {
+      const profile = await this.store.createSpace(button.dataset.template || "blank");
+      this.homeVisible = false;
+      this.resetRenderedGrid();
+      await this.renderWorkspace();
+      history.pushState(null, "", `${location.pathname}?profile=${encodeURIComponent(profile.id)}`);
+      this.announce("Nouvel espace créé");
+    }
+    if (action === "open-space") {
+      const profile = await this.store.openSpace(button.dataset.profileId);
+      this.homeVisible = false;
+      this.resetRenderedGrid();
+      await this.renderWorkspace();
+      if (profile) history.pushState(null, "", `${location.pathname}?profile=${encodeURIComponent(profile.id)}`);
+    }
+    if (action === "delete-space") await this.deleteSpace(button, button.dataset.profileId);
+    if (action === "open-library") {
+      this.pendingInsertion = button.dataset.anchorId
+        ? { anchorId: button.dataset.anchorId, direction: button.dataset.direction || "after" }
+        : null;
+      this.setInsertionMode(null);
+      this.openPanel("library");
+      requestAnimationFrame(() => this.root.querySelector(".catalog-search input")?.focus());
+    }
+    if (action === "edit-module") {
+      this.selectedId = id;
+      this.openPanel("editor");
+    }
+    if (action === "take-assessment") {
+      this.selectedId = id;
+      this.openPanel("assessment");
+    }
+    if (action === "customize-module") {
+      this.selectedId = id;
+      this.openPanel("appearance");
+    }
+    if (action === "module-menu") {
+      event.preventDefault();
+      event.stopPropagation();
+      this.menuFor = this.menuFor === id ? null : id;
+      this.syncOverflowMenus();
+    }
+    if (action === "copy-module") await this.copyModule(button, id);
+    if (action === "delete-module") {
+      event.preventDefault();
+      event.stopPropagation();
+      await this.deleteModule(button, id);
+    }
+    if (action === "surprise-module") await this.surpriseModule(button, id);
+    if (action === "unlock-module") {
+      this.store.mutate((profile) => { profile.morphology.locks.modules[id] = {}; }, { immediate: true });
+      this.renderPanel();
+      this.announce("Personnalisation du fragment déverrouillée");
+    }
+    if (action === "add-module") {
+      const created = createModule(button.dataset.type);
+      await this.insertModule(created, "Fragment ajouté");
+    }
+    if (action === "duplicate-neighbor") {
+      const source = this.store.profile.modules.find((item) => item.id === button.dataset.sourceId);
+      if (source) await this.insertModule(duplicateModule(source, this.effectiveLayout(source)), `${source.title} dupliqué`);
+    }
+    if (action === "set-atmosphere") {
+      this.store.mutate((profile) => { profile.activeAtmosphereId = button.dataset.atmosphere; });
+      await this.renderWorkspace();
+      this.renderPanel();
+    }
+    if (action === "open-atmosphere") this.openPanel("atmosphere");
+    if (action === "reset-atmosphere") await this.resetAtmosphere(button);
+    if (action === "regenerate-name") {
+      this.store.mutate((profile) => {
+        profile.identity.name = generateProfileName();
+        profile.identity.source = "generated";
+        if (profile.identity.avatar?.kind === "initials") profile.identity.avatar = initialsAvatar(profile.identity.name, crypto.randomUUID());
+      });
+      await this.renderWorkspace();
+      this.renderPanel();
+    }
+    if (action === "regenerate-avatar") {
+      this.store.mutate((profile) => { profile.identity.avatar = initialsAvatar(profile.identity.name, crypto.randomUUID()); }, { immediate: true });
+      await this.renderWorkspace();
+      this.renderPanel();
+    }
+    if (action === "edit-identity") {
+      this.identityEditing = true;
+      this.renderPanel();
+    }
+    if (action === "cancel-identity") {
+      this.identityEditing = false;
+      this.renderPanel();
+    }
+    if (action === "save-identity") {
+      const input = this.root.querySelector("[data-identity-name]");
+      const name = input?.value.trim();
+      if (name) this.store.mutate((profile) => {
+        profile.identity.name = name;
+        profile.identity.source = "custom";
+      }, { immediate: true });
+      this.identityEditing = false;
+      await this.renderWorkspace();
+      this.renderPanel();
+    }
+    if (action === "export-json") this.announce(await exportJsonProfile(this.store.profile));
+    if (action === "export-zip") this.announce(await exportZipProfile(this.store.profile));
+    if (action === "export-pdf") this.exportPdf();
+    if (action === "import") this.root.querySelector("#import-input").click();
+    if (action === "reset-profile") await this.resetProfile(button);
+    if (action === "allow-remote") {
+      let hostname = "ce domaine";
+      try { hostname = new URL(button.dataset.url).hostname; } catch {}
+      const allowed = await confirmAt(button, {
+        title: "Autoriser cette ressource distante ?",
+        message: `${hostname} pourra recevoir une requête depuis ce navigateur.`,
+        confirmLabel: "Autoriser"
+      });
+      if (!allowed) return;
+      remoteResources.allow(button.dataset.url, button.dataset.resourceType || "embed");
+      const module = this.store.profile.modules.find((item) => item.id === id);
+      if (module) await this.upsertModule(module, this.root.querySelector("#module-grid"));
+      else {
+        await this.renderWorkspace();
+        this.renderPanel();
+      }
+      this.announce("Domaine autorisé localement");
+    }
+    if (action === "revoke-remote") {
+      remoteResources.revoke(button.dataset.url, button.dataset.resourceType || "generic");
+      await this.renderWorkspace();
+      this.renderPanel();
+      this.announce("Autorisation révoquée");
+    }
+    if (action === "allow-all-consents") {
+      remoteResources.allowAll();
+      await this.renderWorkspace();
+      this.renderPanel();
+      this.announce("Consentements activés localement");
+    }
+    if (action === "disable-all-consents") {
+      remoteResources.revokeAll();
+      await this.renderWorkspace();
+      this.renderPanel();
+      this.announce("Consentements désactivés");
+    }
+    if (action === "surprise-profile") {
+      this.store.mutate((profile) => morphologyEngine.generateProfile(profile, crypto.randomUUID()), { immediate: true });
+      await this.renderWorkspace();
+      for (const module of this.store.profile.modules) {
+        this.gridManager.updateWidget(this.renderedModules.get(module.id)?.widget, module.layout);
+      }
+      this.gridManager.commitLayout();
+      this.renderPanel();
+      this.announce("Nouvelle morphologie générée");
+    }
+    if (action === "toggle-morphology") {
+      this.store.mutate((profile) => { profile.morphology.enabled = !profile.morphology.enabled; }, { immediate: true });
+      this.renderPanel();
+    }
+    if (action === "unlock-morphology") {
+      this.store.mutate((profile) => {
+        profile.morphology.locks = { atmosphere: {}, modules: {} };
+      }, { immediate: true });
+      this.renderPanel();
+    }
+    if (action === "allow-fonts") {
+      remoteResources.allow("https://fonts.bunny.net");
+      await applyAtmosphere(this.store.profile);
+      this.announce("Catalogue Bunny Fonts autorisé");
+    }
+  }
+
+  syncOverflowMenus() {
+    this.menuCleanup?.();
+    this.menuCleanup = null;
+    this.root.querySelectorAll("[data-menu-for]").forEach((menu) => {
+      menu.hidden = menu.dataset.menuFor !== this.menuFor;
+    });
+    if (!this.menuFor) return;
+    const menu = this.root.querySelector(`[data-menu-for="${CSS.escape(this.menuFor)}"]`);
+    const anchor = this.root.querySelector(`[data-action="module-menu"][data-id="${CSS.escape(this.menuFor)}"]`);
+    if (menu && anchor) this.menuCleanup = overlays.position(anchor, menu, { placement: "bottom-end", distance: 7 });
+  }
+
+  openPanel(type) {
+    this.panel = type;
+    this.renderPanel();
+  }
+
+  closePanel() {
+    destroyEditor();
+    this.panel = null;
+    this.selectedId = null;
+    this.root.querySelector("#panel-host").replaceChildren();
+  }
+
+  renderPanel() {
+    destroyEditor();
+    if (!this.panel) return;
+    const panelScroll = this.root.querySelector(".panel__body")?.scrollTop || 0;
+    const module = this.store.profile.modules.find((item) => item.id === this.selectedId);
+    if (this.panel === "menu") this.panelManager.render({ type: "menu", title: "Réglages", eyebrow: "Profil local", body: this.menuBody(), className: "panel--menu" });
+    if (this.panel === "library") this.panelManager.render({ type: "library", title: "Bibliothèque", eyebrow: "Ajouter un fragment", body: this.libraryBody(), className: "panel--library" });
+    if (this.panel === "about") this.panelManager.render({ type: "about", title: "À propos", eyebrow: "Crédits", body: this.aboutBody(), className: "panel--about" });
+    if (this.panel === "consents") this.panelManager.render({ type: "consents", title: "Consentements", eyebrow: "Ressources distantes", body: this.consentsBody(), className: "panel--consents" });
+    if (this.panel === "atmosphere") {
+      this.panelManager.render({ type: "atmosphere", title: "Atmosphère", eyebrow: "Personnalisation", body: this.atmosphereBody(), className: "panel--atmosphere" });
+      this.bindAtmosphereEditor();
+    }
+    if (this.panel === "assessment" && module) {
+      this.panelManager.render({ type: "assessment", title: module.title, eyebrow: "Passation", body: assessmentBody(module), className: `panel--${module.type} panel--assessment` });
+      mountAssessment({
+        module,
+        root: this.root.querySelector(".panel__body"),
+        patch: (mutator, rerender = false) => this.patchModule(module.id, mutator, rerender)
+      });
+    }
+    if (this.panel === "appearance" && module) {
+      this.panelManager.render({ type: "appearance", title: "Apparence", eyebrow: module.title, body: appearanceBody(module), className: `panel--${module.type} panel--appearance` });
+      mountAppearanceEditor({
+        root: this.root.querySelector(".panel__body"),
+        patch: (mutator, rerender = false) => this.patchModule(module.id, mutator, rerender)
+      });
+    }
+    if (this.panel === "editor" && module) {
+      this.panelManager.render({ type: this.panel, title: module.type === "rich-text" ? "Texte riche" : module.title, eyebrow: moduleCatalog.find((item) => item.type === module.type)?.category || "Fragment", body: editorBody(module), className: `panel--${module.type}` });
+      mountEditor({
+        module,
+        root: this.root.querySelector(".panel__body"),
+        patch: (mutator, rerender = false) => this.patchModule(module.id, mutator, rerender),
+        announce: (message) => this.announce(message)
+      });
+    }
+    if (this.panel === "menu") {
+      bindVisualPickers(this.root.querySelector(".panel__body"), (mutator, rerender) => {
+        this.store.mutate((profile) => mutator(profile), { immediate: Boolean(rerender) });
+        this.renderWorkspace();
+        if (rerender) this.renderPanel();
+      }, (message) => this.announce(message));
+    }
+    bindTooltips(this.root.querySelector("#panel-host"));
+    this.resolveAssets(this.root.querySelector("#panel-host"));
+    this.restorePanelScroll(panelScroll);
+  }
+
+  restorePanelScroll(value) {
+    if (!value) return;
+    requestAnimationFrame(() => {
+      const body = this.root.querySelector(".panel__body");
+      if (body) body.scrollTop = value;
+    });
+  }
+
+  menuBody() {
+    const identity = this.store.profile.identity;
+    return `
+      <section class="menu-section menu-section--first"><h3>Espaces</h3><div class="menu-list">
+        <button type="button" data-action="show-home">${icon("PanelTopOpen", 18)}<span><strong>Accueil et modèles</strong><small>Créer ou ouvrir un espace local</small></span></button>
+      </div></section>
+      <section class="profile-card"><span>Identité du profil</span>
+        ${this.identityEditing ? `<label class="field"><span>Nom affiché</span><input data-identity-name value="${escapeAttribute(identity.name)}" autofocus></label>
+          <div class="inline-actions"><button type="button" class="soft-button" data-action="cancel-identity">Annuler</button><button type="button" class="soft-button is-primary" data-action="save-identity">Enregistrer</button></div>`
+          : `<div class="identity-summary"><span class="profile-avatar profile-avatar--large">${visualPreview(identity.avatar)}</span><strong>${escapeHtml(identity.name)}</strong></div>
+          <div class="inline-actions"><button type="button" data-action="edit-identity">${icon("Pencil", 16)} Modifier</button><button type="button" data-action="regenerate-name">${icon("RefreshCw", 16)} Régénérer le nom</button><button type="button" data-action="regenerate-avatar">${icon("Sparkles", 16)} Régénérer le visuel</button></div>`}
+        ${visualPickerField(identity.avatar, "identity.avatar", "Avatar ou visuel")}
+      </section>
+      <section class="menu-section"><div class="section-heading"><h3>Atmosphère</h3><button type="button" data-action="open-atmosphere">${icon("SlidersHorizontal", 15)} Personnaliser</button></div><div class="theme-grid">${this.store.profile.atmospheres.map((atmosphere) => `<button type="button" data-action="set-atmosphere" data-atmosphere="${atmosphere.id}" class="${this.store.profile.activeAtmosphereId === atmosphere.id ? "is-active" : ""}"><i class="theme-swatch" style="--swatch-bg:${atmosphere.colors.bg};--swatch-accent:${atmosphere.colors.accent}"></i>${escapeHtml(atmosphere.name)}</button>`).join("")}</div></section>
+      <section class="menu-section"><h3>Vie privée</h3><div class="menu-list">
+        <button type="button" data-action="open-consents">${icon("ShieldCheck", 18)}<span><strong>Consentements</strong><small>Services distants, embeds, images et métadonnées</small></span></button>
+      </div></section>
+      <section class="menu-section"><h3>Données</h3><div class="data-actions">
+        <button type="button" data-action="import">${fileBadge("IMPORT")}${icon("Upload", 18)}<span><strong>Importer</strong><small>.JSON · .ZIP · .MODULOP.ZIP</small></span></button>
+        <button type="button" data-action="export-json">${fileBadge(".JSON")}${icon("FileJson", 18)}<span><strong>Exporter JSON</strong><small>Profil sans médias</small></span></button>
+        <button type="button" data-action="export-zip">${fileBadge(".ZIP")}${icon("FileArchive", 18)}<span><strong>Exporter ZIP</strong><small>Profil autonome</small></span></button>
+        <button type="button" data-action="export-pdf">${fileBadge(".PDF")}${icon("FileText", 18)}<span><strong>Exporter PDF</strong><small>Impression statique</small></span></button>
+        <button type="button" data-action="reset-profile" class="danger-row">${fileBadge("RESET")}${icon("RotateCcw", 18)}<span><strong>Réinitialiser l’application</strong><small>Supprime espaces, médias et consentements</small></span></button>
+      </div></section>`;
+  }
+
+  aboutBody() {
+    return `<article class="about-markdown markdown-content">${DOMPurify.sanitize(marked.parse(creditsMarkdown(appVersion)))}</article>`;
+  }
+
+  consentsBody() {
+    const services = remoteResources.catalog();
+    const active = services.filter((service) => service.status === "allowed");
+    const inactive = services.filter((service) => service.status !== "allowed");
+    const current = this.consentFilter === "inactive" ? inactive : active;
+    const renderList = current.length ? current.map((service) => `
+      <article class="consent-row" data-search="${`${service.label} ${service.domain} ${service.type}`.toLowerCase()}">
+        ${consentControl({ url: service.url, type: service.type, label: service.label, status: service.status, description: `${service.domain} · ${service.description}` })}
+      </article>`).join("") : `<p class="empty-spaces">Aucun consentement dans cet onglet.</p>`;
+    return `<section class="consent-center">
+      <div class="consent-actions">
+        <label class="field"><span>Rechercher</span><input type="search" placeholder="Domaine, service, type…" oninput="this.closest('.consent-center').querySelectorAll('[data-search]').forEach(row=>row.hidden=!row.dataset.search.includes(this.value.toLowerCase()))"></label>
+        <div class="inline-actions">
+          <button type="button" class="soft-button" data-action="allow-all-consents">${icon("ShieldCheck", 16)} Tout autoriser</button>
+          <button type="button" class="soft-button" data-action="disable-all-consents">${icon("ShieldOff", 16)} Tout désactiver</button>
+        </div>
+      </div>
+      <div class="consent-tabs" role="tablist" aria-label="Filtrer les consentements">
+        <button type="button" data-action="open-consents" data-filter="active" class="${this.consentFilter === "active" ? "is-active" : ""}" aria-pressed="${this.consentFilter === "active"}">Actifs <small>${active.length}</small></button>
+        <button type="button" data-action="open-consents" data-filter="inactive" class="${this.consentFilter === "inactive" ? "is-active" : ""}" aria-pressed="${this.consentFilter === "inactive"}">Inactifs <small>${inactive.length}</small></button>
+      </div>
+      <div class="consent-list">${renderList}</div>
+    </section>`;
+  }
+
+  libraryBody() {
+    const categories = [...new Set(moduleCatalog.map((item) => item.category))];
+    const neighbors = this.insertionNeighbors();
+    const context = this.pendingInsertion
+      ? `<div class="insertion-context">${icon(directionIcon(this.pendingInsertion.direction), 17)}<span>Insertion ${insertionLabel(this.pendingInsertion.direction)}</span></div>`
+      : "";
+    return `<label class="field catalog-search"><span>Rechercher</span><input type="search" placeholder="Test, collection, récit…" oninput="this.closest('.panel__body').querySelectorAll('.catalog-card,.neighbor-card').forEach(card=>card.hidden=!card.dataset.search.includes(this.value.toLowerCase()))"></label>
+      ${context}
+      ${neighbors.length ? `<section class="catalog-section neighbor-section"><h3>Dupliquer rapidement</h3><p>Reprendre le contenu et les dimensions d’un fragment voisin.</p><div class="neighbor-catalog">${neighbors.map((module) => {
+        const definition = moduleCatalog.find((item) => item.type === module.type);
+        const layout = this.effectiveLayout(module);
+        return `<button class="neighbor-card" type="button" data-action="duplicate-neighbor" data-source-id="${module.id}" data-search="${`${module.title} ${definition?.label || ""}`.toLowerCase()}">
+          <span>${icon(definition?.icon || "CopyPlus", 18)}</span><strong>${escapeHtml(module.title)}</strong>
+          <small>${layout.w} × ${layout.h}</small>${icon("CopyPlus", 15)}
+        </button>`;
+      }).join("")}</div></section>` : ""}
+      ${categories.map((category) => `<section class="catalog-section"><h3>${category}</h3><div class="catalog">${moduleCatalog.filter((item) => item.category === category).map((item) => `
+        <button class="catalog-card" type="button" data-action="add-module" data-type="${item.type}" data-search="${`${item.label} ${category}`.toLowerCase()}"><span>${icon(item.icon, 20)}</span><strong>${item.label}</strong>${icon("ArrowUpRight", 15)}</button>`).join("")}</div></section>`).join("")}`;
+  }
+
+  insertionNeighbors() {
+    if (!this.pendingInsertion) return [];
+    const anchor = this.store.profile.modules.find((item) => item.id === this.pendingInsertion.anchorId);
+    if (!anchor) return [];
+    const center = layoutCenter(this.effectiveLayout(anchor));
+    const directional = this.store.profile.modules
+      .filter((module) => module.id !== anchor.id)
+      .map((module) => {
+        const candidate = layoutCenter(this.effectiveLayout(module));
+        return {
+          module,
+          distance: layoutDistance(center, candidate),
+          aligned: isInDirection(center, candidate, this.pendingInsertion.direction)
+        };
+      })
+      .sort((a, b) => Number(b.aligned) - Number(a.aligned) || a.distance - b.distance)
+      .slice(0, 2)
+      .map(({ module }) => module);
+    return [anchor, ...directional];
+  }
+
+  async insertModule(created, message) {
+    const insertion = this.pendingInsertion ? { ...this.pendingInsertion } : null;
+    this.store.mutate((profile) => profile.modules.push(created), { immediate: true });
+    this.closePanel();
+    await this.renderWorkspace();
+    if (insertion) {
+      const anchor = this.store.profile.modules.find((item) => item.id === insertion.anchorId);
+      const record = this.renderedModules.get(created.id);
+      if (anchor && record) this.gridManager.positionNear(record.widget, this.effectiveLayout(anchor), insertion.direction, created.layout);
+    }
+    this.pendingInsertion = null;
+    this.announce(message);
+  }
+
+  effectiveLayout(module) {
+    const node = this.renderedModules.get(module.id)?.widget?.gridstackNode;
+    const definition = moduleCatalog.find((item) => item.type === module.type);
+    return {
+      ...module.layout,
+      x: node?.x ?? module.layout.x ?? 0,
+      y: node?.y ?? module.layout.y ?? 0,
+      w: node?.w ?? module.layout.w ?? definition?.layout?.[0] ?? 4,
+      h: node?.h ?? module.layout.h ?? definition?.layout?.[1] ?? 4
+    };
+  }
+
+  atmosphereBody() {
+    const atmosphere = activeAtmosphere(this.store.profile);
+    const ratio = contrastRatio(atmosphere.colors.text, atmosphere.colors.bg);
+    const locks = this.store.profile.morphology.locks.atmosphere;
+    const state = (section) => locks[section] ? "Verrouillé" : this.store.profile.morphology.enabled ? "Aléatoire" : "Manuel";
+    const colorFields = [["bg", "Fond"], ["surface", "Surface"], ["text", "Texte"], ["accent", "Accent"], ["aqua", "Interaction"], ["acid", "Signal"]];
+    const fontOptions = (category) => listFonts(category).map((font) => `<option value="${font.id}">${font.label}</option>`).join("");
+    return `
+      <div class="save-state" data-save-state><i></i><span>Enregistré localement</span></div>
+      <section class="atmosphere-studio">
+        <header class="studio-hero">
+          <div class="studio-hero__scene" style="--scene-bg:${atmosphere.colors.bg};--scene-surface:${atmosphere.colors.surface};--scene-accent:${atmosphere.colors.accent}">
+            <i></i><strong>${escapeHtml(this.store.profile.identity.name)}</strong><span></span>
+          </div>
+          <div><span class="eyebrow">Studio morphique</span><h3>${escapeHtml(atmosphere.name)}</h3><p>Chaque scène est manipulable et peut rester aléatoire ou être verrouillée.</p></div>
+          <button class="soft-button is-primary" type="button" data-action="surprise-profile">${icon("Sparkles", 16)} Surprenez-moi</button>
+        </header>
+        <label class="morph-input"><span>Nom de l’atmosphère</span><input data-atmosphere-path="name" data-morph-section="identity" value="${escapeAttribute(atmosphere.name)}"></label>
+        <div class="atmosphere-actions">
+          <button class="soft-button is-primary" type="button" data-action="surprise-profile">${icon("Sparkles", 16)} Surprenez-moi</button>
+          <button class="soft-button" type="button" data-action="reset-atmosphere">${icon("RotateCcw", 16)} Réinitialiser Custom</button>
+        </div>
+        ${disclosure("Palette", `<div class="morph-color-grid morph-color-grid--wide">${colorFields.map(([key,label]) => `<label class="morph-color morph-color--wide"><i style="--control-color:${atmosphere.colors[key]}"></i><span>${label}</span><output>${atmosphere.colors[key]}</output><input type="color" data-atmosphere-path="colors.${key}" data-morph-section="palette" value="${atmosphere.colors[key]}"></label>`).join("")}</div><p class="contrast-status ${ratio < 4.5 ? "is-warning" : ""}">${ratio < 4.5 ? icon("TriangleAlert",16) : icon("BadgeCheck",16)} Contraste ${ratio.toFixed(1)}:1</p>`, { open:true, state:state("palette") })}
+        ${disclosure("Arrière-plan", `${choiceCards("background.mode","Composition",[
+          {value:"solid",label:"Uni",preview:"preview-solid"},{value:"gradient",label:"Linéaire",preview:"preview-gradient"},{value:"radial",label:"Radial",preview:"preview-radial"},{value:"conic",label:"Conique",preview:"preview-conic"},{value:"mesh",label:"Mesh",preview:"preview-mesh"},{value:"image",label:"Image",preview:"preview-image"}
+        ],atmosphere.background.mode)}
+          ${renderField("range",{label:"Angle",name:"background.angle",value:atmosphere.background.angle,min:0,max:360,unit:"°",theme:atmosphere.controls.rangeTheme})}
+          ${renderField("range",{label:"Texture",name:"background.texture",value:atmosphere.background.texture,min:0,max:18,unit:"%",theme:atmosphere.controls.rangeTheme})}
+          ${switchControl("background.animated","Dégradé vivant",atmosphere.background.animated,"Animation respectant la réduction de mouvement")}
+        `,{open:true,state:state("background")})}
+        ${disclosure("Typographie", `<div class="catalog-fields">${searchSelect("typography.sans", "Texte courant", listFonts("sans-serif"), atmosphere.typography.sans)}${searchSelect("typography.serif", "Titres", listFonts("serif"), atmosphere.typography.serif)}</div>${renderField("range",{label:"Échelle",name:"typography.scale",value:atmosphere.typography.scale,min:85,max:120,unit:"%",theme:atmosphere.controls.rangeTheme})}${consentControl({url:"https://fonts.bunny.net",type:"font",label:"Bunny Fonts",status:remoteResources.status("https://fonts.bunny.net","font"),description:"Catalogue typographique distant facultatif"})}`,{state:state("typography")})}
+        ${disclosure("Formes et mouvement", `${renderField("range",{label:"Rayons",name:"shape.radius",value:atmosphere.shape.radius,min:0,max:40,unit:" px",theme:atmosphere.controls.rangeTheme})}${renderField("range",{label:"Bordures",name:"shape.borderOpacity",value:atmosphere.shape.borderOpacity,min:4,max:35,unit:"%",theme:atmosphere.controls.rangeTheme})}${renderField("range",{label:"Ombres",name:"shape.shadow",value:atmosphere.shape.shadow,min:0,max:70,unit:"%",theme:atmosphere.controls.rangeTheme})}${renderField("range",{label:"Mouvement",name:"motion.intensity",value:atmosphere.motion.intensity,min:0,max:140,unit:"%",theme:atmosphere.controls.rangeTheme})}`,{state:state("shape")})}
+        ${disclosure("Style des curseurs", `<div class="slider-theme-grid">${rangeThemeCatalog().map(({ id, label }) => `<article class="slider-theme-card ${atmosphere.controls.rangeTheme===id?"is-active":""}">${renderField("range",{label,name:`preview-${id}`,value:58,min:0,max:100,theme:id})}<button type="button" data-atmosphere-choice="controls.rangeTheme" data-value="${id}" aria-pressed="${atmosphere.controls.rangeTheme===id}">Utiliser ce style</button></article>`).join("")}</div>`,{open:true,state:state("controls")})}
+        ${disclosure("Header morphique", `${choiceCards("header.mode","Comportement",[{value:"off",label:"Compact",preview:"preview-header-compact"},{value:"reveal",label:"Révélé",preview:"preview-header-reveal"},{value:"always",label:"Permanent",preview:"preview-header-always"}],atmosphere.header.mode)}${choiceCards("header.effect","Transition",[{value:"glide",label:"Glissement"},{value:"fade",label:"Fondu"},{value:"scale",label:"Échelle"}],atmosphere.header.effect)}${renderField("range",{label:"Échelle du titre",name:"header.typeScale",value:atmosphere.header.typeScale,min:75,max:140,unit:"%",theme:atmosphere.controls.rangeTheme})}`,{open:true,state:state("header")})}
+      </section>`;
+  }
+
+  bindAtmosphereEditor() {
+    const root = this.root.querySelector(".panel__body");
+    root.querySelectorAll("[data-atmosphere-path]").forEach((input) => input.addEventListener("input", async () => {
+      this.store.mutate((profile) => {
+        const target = activateCustomAtmosphere(profile);
+        setNested(target, input.dataset.atmospherePath, input.type === "range" ? Number(input.value) : input.type === "checkbox" ? input.checked : input.value);
+        lockMorphologySection(profile, "atmosphere", input.dataset.morphSection || sectionForPath(input.dataset.atmospherePath));
+      });
+      input.closest("label")?.querySelector("output")?.replaceChildren(input.type === "color" ? input.value : `${input.value}${input.dataset.suffix || ""}`);
+      await applyAtmosphere(this.store.profile);
+      this.updateAtmospherePreview();
+    }));
+    root.querySelectorAll("[data-atmosphere-choice]").forEach((button) => button.addEventListener("click", async () => {
+      this.store.mutate((profile) => {
+        setNested(activateCustomAtmosphere(profile), button.dataset.atmosphereChoice, button.dataset.value);
+        lockMorphologySection(profile, "atmosphere", sectionForPath(button.dataset.atmosphereChoice));
+      });
+      await applyAtmosphere(this.store.profile);
+      this.renderPanel();
+    }));
+    ControlRegistry.bind(root, async (path, value, input) => {
+      if (path.startsWith("preview-")) return;
+      this.store.mutate((profile) => {
+        setNested(activateCustomAtmosphere(profile), path, value);
+        lockMorphologySection(profile, "atmosphere", sectionForPath(path));
+      });
+      await applyAtmosphere(this.store.profile);
+      if (input?.matches("button,[type='checkbox']")) this.renderPanel();
+      else {
+        input?.closest(".meta-range")?.querySelector("output")?.replaceChildren(String(value));
+        this.updateAtmospherePreview();
+      }
+    });
+    root.querySelectorAll("[data-search-choice]").forEach((button) => button.addEventListener("click", async () => {
+      this.store.mutate((profile) => {
+        setNested(activateCustomAtmosphere(profile), button.dataset.searchChoice, button.dataset.value);
+        lockMorphologySection(profile, "atmosphere", sectionForPath(button.dataset.searchChoice));
+      }, { immediate: true });
+      await applyAtmosphere(this.store.profile);
+      this.renderPanel();
+    }));
+    root.querySelectorAll("[data-search-filter]").forEach((input) => input.addEventListener("input", () => {
+      const query = input.value.toLowerCase();
+      input.closest(".search-select")?.querySelectorAll("[data-search-choice]").forEach((button) => {
+        button.hidden = !button.dataset.search.includes(query);
+      });
+    }));
+  }
+
+  updateAtmospherePreview() {
+    const root = this.root.querySelector(".panel__body");
+    const atmosphere = activeAtmosphere(this.store.profile);
+    const ratio = contrastRatio(atmosphere.colors.text, atmosphere.colors.bg);
+    const status = root.querySelector(".contrast-status");
+    if (status) {
+      status.classList.toggle("is-warning", ratio < 4.5);
+      status.innerHTML = `${ratio < 4.5 ? icon("TriangleAlert", 16) : icon("BadgeCheck", 16)} Contraste principal ${ratio.toFixed(1)}:1 ${ratio < 4.5 ? "— à surveiller" : "— lisible"}`;
+    }
+  }
+
+  async resetAtmosphere(anchor) {
+    const confirmed = await confirmAt(anchor, { title: "Réinitialiser Custom ?", message: "Les réglages personnalisés seront remplacés par l’atmosphère active de référence.", confirmLabel: "Réinitialiser" });
+    if (!confirmed) return;
+    const base = createDefaultAtmospheres()[0];
+    this.store.mutate((profile) => {
+      const index = profile.atmospheres.findIndex((item) => item.id === "custom");
+      profile.atmospheres[index] = { ...base, id: "custom", name: "Custom", custom: true };
+      profile.activeAtmosphereId = "custom";
+    });
+    await this.renderWorkspace();
+    this.renderPanel();
+  }
+
+  async copyModule(anchor, id) {
+    const element = this.renderedModules.get(id)?.element;
+    if (!element) return;
+    element.classList.add("is-capturing");
+    try {
+      const blob = await toBlob(element, { pixelRatio: 2, cacheBust: true, backgroundColor: getComputedStyle(document.body).getPropertyValue("--bg").trim() });
+      if (!blob) throw new Error();
+      if (navigator.clipboard?.write && window.ClipboardItem) {
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+        this.announce("Image du fragment copiée");
+      } else {
+        this.downloadBlob(blob, `${id}.png`);
+        this.announce("Image téléchargée");
+      }
+    } catch {
+      try {
+        const blob = await toBlob(element, { pixelRatio: 2 });
+        if (blob) this.downloadBlob(blob, `${id}.png`);
+        this.announce("Presse-papier indisponible, image téléchargée");
+      } catch {
+        this.announce("La capture de ce fragment a échoué");
+      }
+    } finally {
+      element.classList.remove("is-capturing");
+    }
+  }
+
+  downloadBlob(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const link = Object.assign(document.createElement("a"), { href: url, download: name });
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async deleteModule(anchor, id) {
+    const module = this.store.profile.modules.find((item) => item.id === id);
+    if (!module || this.store.profile.modules.length <= 1) return;
+    const confirmAnchor = this.renderedModules.get(id)?.element || anchor;
+    this.menuFor = null;
+    this.syncOverflowMenus();
+    const confirmed = await confirmAt(confirmAnchor, { title: "Supprimer ce fragment ?", message: `"${module.title}" sera retiré du profil.`, confirmLabel: "Supprimer" });
+    if (!confirmed) return;
+    this.store.mutate((profile) => { profile.modules = profile.modules.filter((item) => item.id !== id); }, { immediate: true });
+    await this.renderWorkspace();
+    this.announce("Fragment supprimé");
+  }
+
+  async deleteSpace(anchor, id) {
+    if (!id) return;
+    const confirmed = await confirmAt(anchor, { title: "Supprimer cet espace ?", message: "Cet espace local sera retiré de ce navigateur.", confirmLabel: "Supprimer" });
+    if (!confirmed) return;
+    await this.store.deleteSpace(id);
+    this.resetRenderedGrid();
+    await this.renderWorkspace();
+    this.announce("Espace supprimé");
+  }
+
+  async surpriseModule(anchor, id) {
+    const module = this.store.profile.modules.find((item) => item.id === id);
+    if (!module) return;
+    this.store.mutate((profile) => {
+      const target = profile.modules.find((item) => item.id === id);
+      profile.morphology.locks.modules[id] ||= {};
+      morphologyEngine.generateModule(target, seededFrom(id, crypto.randomUUID()), profile.morphology.locks.modules[id]);
+    }, { immediate: true });
+    await this.renderWorkspace();
+    this.gridManager.updateWidget(this.renderedModules.get(id)?.widget, module.layout);
+    this.announce("Présentation du fragment régénérée");
+  }
+
+  async resetProfile(anchor) {
+    const stats = await this.store.stats();
+    const confirmed = await confirmAt(anchor, {
+      title: "Réinitialiser l’application ?",
+      message: `${stats.profiles} espace(s), ${stats.assets} média(s), ${stats.consents} autorisation(s) distante(s) et les préférences locales seront supprimés. Les caches et cookies accessibles de ce domaine seront aussi nettoyés.`,
+      confirmLabel: "Réinitialiser"
+    });
+    if (!confirmed) return;
+    await this.store.resetAllLocalData();
+    this.homeVisible = true;
+    this.resetRenderedGrid();
+    this.closePanel();
+    await this.renderWorkspace();
+    history.replaceState(null, "", `${location.pathname}?home=1`);
+    this.announce("Application réinitialisée");
+  }
+
+  async handleImport(event) {
+    const [file] = event.target.files;
+    if (!file) return;
+    await this.importFile(file, { anchor: this.root.querySelector("[data-action='import']") });
+    event.target.value = "";
+  }
+
+  async importFile(file, { anchor, fromDrop = false } = {}) {
+    try {
+      if (!isPortableFile(file)) throw new Error();
+      const confirmed = await confirmAt(anchor || null, {
+        title: "Importer ce fichier ?",
+        message: `${file.name} sera ajouté comme espace local et deviendra l’espace actif.`,
+        confirmLabel: "Importer"
+      });
+      if (!confirmed) return;
+      const profile = await importProfile(file);
+      if (profile.schemaVersion !== 1 || !Array.isArray(profile.modules)) throw new Error();
+      const existing = profile.id ? await db.profiles.get(profile.id) : null;
+      if (!profile.id || existing) profile.id = crypto.randomUUID();
+      profile.updatedAt = new Date().toISOString();
+      profile.template ||= "import";
+      await db.profiles.put(profile);
+      await db.preferences.put({ key: "activeProfileId", value: profile.id });
+      this.store.profile = profile;
+      this.homeVisible = false;
+      this.resetRenderedGrid();
+      await this.renderWorkspace();
+      history.pushState(null, "", `${location.pathname}?profile=${encodeURIComponent(profile.id)}`);
+      this.announce(fromDrop ? "Fichier importé depuis le dépôt" : "Fichier MODULOP importé");
+    } catch {
+      this.announce("Fichier MODULOP invalide");
+    }
+  }
+
+  exportPdf() {
+    document.body.classList.add("is-printing");
+    this.announce("Préparation de l’export PDF");
+    requestAnimationFrame(() => {
+      window.print();
+      setTimeout(() => document.body.classList.remove("is-printing"), 500);
+    });
+  }
+
+  bindContentInteractions() {
+    this.root.querySelectorAll(".object-card").forEach((card) => card.addEventListener("click", () => {
+      const module = this.store.profile.modules.find((item) => item.id === card.closest(".module").dataset.moduleId);
+      const item = module?.data.items?.[Number(card.dataset.objectIndex)];
+      if (item) this.announce(`${item.label} — ${item.note}`);
+    }));
+  }
+
+  saveGridLayout(layouts) {
+    this.store.mutate((profile) => {
+      const byId = new Map(layouts.map((layout) => [layout.id, layout]));
+      profile.modules.forEach((module) => {
+        const layout = byId.get(module.id);
+        if (layout) module.layout = layout;
+      });
+    }, { history: false, immediate: true });
+  }
+
+  updateSaveState(status) {
+    this.root.querySelectorAll("[data-save-state]").forEach((element) => {
+      element.dataset.status = status;
+      element.querySelector("span").textContent = status === "saved" ? "Enregistré localement" : status === "saving" ? "Enregistrement…" : "Modifié";
+    });
+  }
+
+  announce(message) {
+    const toast = this.root.querySelector(".toast");
+    clearTimeout(this.toastTimer);
+    toast.textContent = message;
+    toast.classList.add("is-visible");
+    this.toastTimer = setTimeout(() => toast.classList.remove("is-visible"), 2400);
+  }
+
+  resetRenderedGrid() {
+    for (const record of this.renderedModules.values()) destroyModule(record.module, record.element);
+    this.renderedModules.clear();
+    this.gridManager?.clear();
+    this.hasHydratedGrid = false;
+    this.selectedId = null;
+    this.menuFor = null;
+    this.pendingInsertion = null;
+    this.insertionModeId = null;
+  }
+}
+
+async function bootstrap() {
+  await store.init();
+  await new ModulopApp(appRoot, store).init();
+}
+
+bootstrap().catch((error) => {
+  console.error(error);
+  appRoot.innerHTML = `<main class="fatal-error"><h1>MODULOP n’a pas pu démarrer.</h1><p>Rechargez la page ou effacez les données locales du site.</p></main>`;
+});
+
+function rangeField(label, path, value, min, max, suffix) {
+  return `<label class="kinetic-range"><span>${label}<output>${value}${suffix}</output></span><input type="range" min="${min}" max="${max}" value="${value}" data-atmosphere-path="${path}" data-suffix="${suffix}"></label>`;
+}
+
+function profileTemplates() {
+  return [
+    { id: "blank", label: "Profil vierge", icon: "FilePlus2", description: "Une page minimale pour construire librement." },
+    { id: "starter", label: "Starter personnel", icon: "Shapes", description: "Objets, portrait et mode d’emploi." },
+    { id: "tests", label: "Tests & questionnaires", icon: "ListChecks", description: "SEC, SIC, TPACK, IPIP et passations." },
+    { id: "portfolio", label: "Portfolio narratif", icon: "Milestone", description: "Chronique, ressources et récit." },
+    { id: "research-sicsia", label: "Recherche/SICsIA", icon: "Network", description: "Fragments centrés intelligence collective." },
+    { id: "media", label: "Web & médias", icon: "PanelsTopLeft", description: "Liens enrichis, embeds et collections." }
+  ];
+}
+
+function rangeThemeCatalog() {
+  return [
+    { id: "expressive", label: "Élastique" },
+    { id: "segmented", label: "Sémantique" },
+    { id: "bubble", label: "Bulle" },
+    { id: "bands", label: "Bandes" },
+    { id: "magnetic", label: "Magnétique" },
+    { id: "ribbon", label: "Ruban" },
+    { id: "pulse", label: "Pulse" },
+    { id: "minimal", label: "Minimal" }
+  ];
+}
+
+function searchSelect(path, label, options, value) {
+  return `<section class="search-select"><label><span>${escapeHtml(label)}</span><input type="search" data-search-filter placeholder="Filtrer une police…"></label>
+    <div>${options.map((font) => `<button type="button" data-search-choice="${path}" data-value="${font.id}" data-search="${`${font.label} ${font.category} ${font.provider || ""}`.toLowerCase()}" class="${font.id === value ? "is-active" : ""}">
+      <strong>${escapeHtml(font.label)}</strong><small>${escapeHtml(font.provider || "système")} · ${escapeHtml(font.category || "")}</small>
+    </button>`).join("")}</div></section>`;
+}
+
+function seededFrom(...parts) {
+  let value = parts.join(":").split("").reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) >>> 0, 2166136261);
+  return () => ((value = Math.imul(value ^ value >>> 15, 1 | value) + 0x6D2B79F5 | 0) >>> 0) / 4294967296;
+}
+
+function createInsertionControls(module) {
+  const controls = document.createElement("nav");
+  controls.className = "grid-insertions";
+  controls.setAttribute("aria-label", `Ajouter près de ${module.title}`);
+  controls.innerHTML = ["before", "right", "after", "left"].map((direction) => `
+    <button type="button" data-action="open-library" data-anchor-id="${module.id}" data-direction="${direction}"
+      aria-label="Ajouter un fragment ${insertionLabel(direction)} ${escapeAttribute(module.title)}">
+      <span aria-hidden="true">${icon("Plus", 14)}</span>
+      <em>${directionShortLabel(direction)}</em>
+    </button>`).join("");
+  return controls;
+}
+
+function duplicateModule(source, layout) {
+  const copy = structuredClone(source);
+  copy.id = crypto.randomUUID();
+  copy.title = `${source.title} — copie`;
+  copy.layout = { ...layout, x: undefined, y: undefined };
+  return copy;
+}
+
+function insertionLabel(direction) {
+  return {
+    before: "au-dessus de",
+    after: "en dessous de",
+    left: "à gauche de",
+    right: "à droite de"
+  }[direction];
+}
+
+function directionShortLabel(direction) {
+  return { before: "Au-dessus", after: "En dessous", left: "À gauche", right: "À droite" }[direction];
+}
+
+function directionIcon(direction) {
+  return { before: "ArrowUp", after: "ArrowDown", left: "ArrowLeft", right: "ArrowRight" }[direction];
+}
+
+function layoutCenter(layout) {
+  return { x: (layout.x || 0) + (layout.w || 1) / 2, y: (layout.y || 0) + (layout.h || 1) / 2 };
+}
+
+function layoutDistance(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function isInDirection(anchor, candidate, direction) {
+  if (direction === "before") return candidate.y < anchor.y;
+  if (direction === "after") return candidate.y > anchor.y;
+  if (direction === "left") return candidate.x < anchor.x;
+  return candidate.x > anchor.x;
+}
+
+function isPortableFile(file) {
+  return Boolean(file?.name && /\.(json|zip|modulop\.zip)$/i.test(file.name));
+}
+
+function fileBadge(label) {
+  return `<b class="file-badge">${escapeHtml(label)}</b>`;
+}
+
+function selectValue(options, value) {
+  return options.replace(`value="${value}"`, `value="${value}" selected`);
+}
+
+function setNested(target, path, value) {
+  const parts = path.split(".");
+  const key = parts.pop();
+  const owner = parts.reduce((current, part) => current[part], target);
+  owner[key] = value;
+}
+
+function escapeAttribute(value = "") {
+  return escapeHtml(value).replaceAll('"', "&quot;");
+}
+
+function sectionForPath(path = "") {
+  const root = path.split(".")[0];
+  return ({ colors: "palette", background: "background", typography: "typography", shape: "shape", motion: "motion", icons: "icons", header: "header", controls: "controls" })[root] || root;
+}
+
+function applyModulePresentation(element, options) {
+  const properties = {
+    "--module-surface": options.surface || "",
+    "--module-text": options.text || "",
+    "--module-accent": options.accent || "",
+    "--module-radius": options.radius ? `${options.radius}px` : "",
+    "--module-density": options.density ? options.density / 100 : "",
+    "--module-motion": options.motion ? options.motion / 100 : ""
+  };
+  Object.entries(properties).forEach(([key, value]) => value === "" ? element.style.removeProperty(key) : element.style.setProperty(key, value));
+}
+
+function isAssessmentModule(module) {
+  return ["gardner", "self-efficacy", "learner-efficacy", "collective-efficacy", "collective-intelligence", "sic-compact", "sic-long", "tpack", "personality", "cognitive"].includes(module?.type);
+}
