@@ -47,7 +47,7 @@ async function runDesktopQa(browser) {
   await assertVisible(page, ".welcome-hero", "accueil");
   await page.screenshot({ path: join(qaDir, "home-desktop.png"), fullPage: true });
 
-  await page.getByRole("button", { name: /Profil vierge/i }).click();
+  await page.getByRole("button", { name: /Espace vierge/i }).click();
   await page.waitForSelector(".blank-workspace:not([hidden])");
   await assertVisible(page, ".blank-workspace__drop", "onboarding espace vierge");
   await page.screenshot({ path: join(qaDir, "blank-desktop.png"), fullPage: true });
@@ -64,9 +64,9 @@ async function runDesktopQa(browser) {
   await assertVisible(page, ".panel--rich-text", "panneau d’action principale");
   await page.getByRole("button", { name: "Fermer", exact: true }).click();
 
-  await page.getByRole("button", { name: /Ouvrir le menu/i }).click();
+  await page.locator(".command-toolbar [data-action='open-menu']").click();
   await assertVisible(page, ".panel--menu", "menu profil");
-  await page.getByRole("button", { name: /Accueil et modèles/i }).click();
+  await page.getByRole("button", { name: /Espaces et modèles/i }).click();
   await assertVisible(page, ".welcome-section--spaces", "liste des espaces");
   await page.screenshot({ path: join(qaDir, "spaces-desktop.png"), fullPage: true });
 

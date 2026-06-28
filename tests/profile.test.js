@@ -5,6 +5,7 @@ describe("profil V3", () => {
   it("crée uniquement le nouveau schéma", () => {
     const profile = createDefaultProfile();
     expect(profile.schemaVersion).toBe(SCHEMA_VERSION);
+    expect(profile.space).toMatchObject({ kind: "personal", title: "Espace personnel", visibility: "private", locked: true });
     expect(profile.modules).toHaveLength(14);
     expect(profile.identity.name).toBeTruthy();
     expect(profile.identity.avatar.kind).toBe("initials");
@@ -18,6 +19,8 @@ describe("profil V3", () => {
     expect(profile.morphology.seed).toBe("modulop-v36");
     expect(profile.credits).toHaveLength(8);
     expect(profile.uiPreferences.panels.about.edge).toBe("bottom");
+    expect(profile.uiPreferences.commandToolbar.edge).toBe("left");
+    expect(profile.uiPreferences.commandToolbar.order).toContain("presence");
   });
 
   it("génère un pseudonyme stable en trois parties", () => {
@@ -36,6 +39,7 @@ describe("profil V3", () => {
   it("crée un espace vierge sans fragment d’amorçage", () => {
     const profile = createProfileFromTemplate("blank");
     expect(profile.template).toBe("blank");
+    expect(profile.space).toMatchObject({ kind: "workspace", locked: false });
     expect(profile.modules).toHaveLength(0);
     expect(profile.uiPreferences.moduleActions.visibleShortcuts).toBe(1);
   });

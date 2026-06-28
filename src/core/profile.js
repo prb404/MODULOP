@@ -7,6 +7,7 @@ import { morphologyState } from "./morphology.js";
 import { componentSources } from "./component-sources.js";
 
 export const SCHEMA_VERSION = 1;
+export const PERSONAL_SPACE_TITLE = "Espace personnel";
 
 export const moduleCatalog = [
   { type: "rich-text", label: "Texte riche", category: "Contenus", icon: "Type", layout: [12, 5] },
@@ -53,13 +54,21 @@ const demoResponses = Object.fromEntries(Array.from({ length: 72 }, (_, index) =
 
 export function createDefaultProfile() {
   const atmospheres = createDefaultAtmospheres();
+  const identityName = generateProfileName();
   return {
     schemaVersion: SCHEMA_VERSION,
     id: crypto.randomUUID(),
+    space: {
+      kind: "personal",
+      title: PERSONAL_SPACE_TITLE,
+      visibility: "private",
+      locked: true,
+      createdAt: new Date().toISOString()
+    },
     identity: {
-      name: generateProfileName(42),
+      name: identityName,
       source: "generated",
-      avatar: createDefaultAvatar("Bambou Koala Solaire")
+      avatar: createDefaultAvatar(identityName)
     },
     atmospheres,
     activeAtmosphereId: "ink",
@@ -72,6 +81,14 @@ export function createDefaultProfile() {
     updatedAt: new Date().toISOString(),
     uiPreferences: {
       moduleActions: { visibleShortcuts: 1 },
+      commandToolbar: {
+        edge: "left",
+        x: 18,
+        y: 120,
+        size: 48,
+        expanded: false,
+        order: ["spaces", "fragments", "presence", "import", "appearance", "settings", "help"]
+      },
       panels: {
         menu: { mode: "dock", edge: "right", size: 390 },
         library: { mode: "dock", edge: "right", size: 520 },
@@ -186,6 +203,13 @@ export function createProfileFromTemplate(template = "blank") {
   };
   const keep = new Set(sets[template] || sets.blank);
   profile.id = crypto.randomUUID();
+  profile.space = {
+    kind: "workspace",
+    title: template === "blank" ? "Nouvel espace" : `Espace ${sets[template] ? templateLabel(template) : "modulaire"}`,
+    visibility: "private",
+    locked: false,
+    createdAt: new Date().toISOString()
+  };
   profile.template = template;
   profile.modules = profile.modules.filter((module) => keep.has(module.type)).map((module, index) => ({
     ...module,
@@ -197,6 +221,17 @@ export function createProfileFromTemplate(template = "blank") {
   }
   profile.updatedAt = new Date().toISOString();
   return profile;
+}
+
+function templateLabel(template) {
+  return ({
+    starter: "personnel",
+    tests: "questionnaires",
+    portfolio: "portfolio",
+    "research-sicsia": "recherche",
+    media: "média",
+    blank: "vierge"
+  })[template] || "modulaire";
 }
 
 const templates = {

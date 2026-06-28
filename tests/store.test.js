@@ -4,6 +4,7 @@ import { db, normalizeProfile, ProfileStore, saveAsset } from "../src/core/store
 afterEach(async () => {
   await db.profiles.clear();
   await db.assets.clear();
+  await db.preferences.clear();
 });
 
 describe("persistance locale", () => {
@@ -42,12 +43,27 @@ describe("persistance locale", () => {
 
     expect(normalizeProfile(legacy)).toBe(true);
     expect(legacy.template).toBe("custom");
+    expect(legacy.space).toMatchObject({ kind: "workspace", title: "Ancien profil", visibility: "private", locked: false });
     expect(legacy.uiPreferences.moduleActions.visibleShortcuts).toBe(1);
+    expect(legacy.uiPreferences.commandToolbar.edge).toBe("left");
     expect(legacy.uiPreferences.panels.editor.edge).toBe("right");
     expect(legacy.realtimeTraces.comments).toEqual([]);
     expect(legacy.realtimeTraces.reactions).toEqual([]);
     expect(legacy.modules[0].layout.w).toBe(12);
     expect(legacy.modules[0].layout.h).toBe(5);
     expect(legacy.modules[0].presentation.rendererId).toBeTruthy();
+  });
+
+  it("verrouille l’espace personnel et refuse sa suppression", async () => {
+    const store = new ProfileStore();
+    await store.init();
+    const personalId = store.profile.id;
+    expect(store.profile.space.title).toBe("Espace personnel");
+    expect(await store.deleteSpace(personalId)).toBe(false);
+    expect(await db.profiles.get(personalId)).toBeTruthy();
+
+    const workspace = await store.createSpace("blank");
+    expect(workspace.space.kind).toBe("workspace");
+    expect(await store.deleteSpace(workspace.id)).toBe(true);
   });
 });

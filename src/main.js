@@ -1,7 +1,7 @@
 import "gridstack/dist/gridstack.min.css";
 import "./styles.css";
 import { createModule, generateProfileName, moduleCatalog } from "./core/profile.js";
-import { ProfileStore, db, normalizeProfile, resolveAsset, saveAsset } from "./core/store.js";
+import { ProfileStore, db, normalizeProfile, resolveAsset, saveAsset, normalizeWorkspaceSpace } from "./core/store.js";
 import { exportFragmentPackage, exportJsonProfile, exportZipProfile, importFragmentPackage, importProfile } from "./core/portable.js";
 import { classifyFileInput, classifyTextInput, createMediaModule, createModuleFromTextClassification } from "./core/ingest.js";
 import { renderModuleContent, mountModule, destroyModule, escapeHtml } from "./renderers/index.js";
@@ -9,6 +9,7 @@ import { editorBody, mountEditor, destroyEditor, assessmentBody, mountAssessment
 import { icon, iconButton } from "./ui/icons.js";
 import { bindTooltips } from "./ui/tooltip.js";
 import { PanelManager } from "./ui/panel-manager.js";
+import { CommandToolbar } from "./ui/command-toolbar.js";
 import { confirmAt } from "./ui/confirm.js";
 import { activateCustomAtmosphere, activeAtmosphere, applyAtmosphere, contrastRatio, createDefaultAtmospheres } from "./core/atmospheres.js";
 import { listFonts, loadFonts } from "./core/fonts.js";
@@ -22,7 +23,7 @@ import { MorphologyEngine, lockMorphologySection } from "./core/morphology.js";
 import { creditsMarkdown } from "./core/component-sources.js";
 import { initialsAvatar } from "./core/visuals.js";
 import { appVersion } from "./core/version.js";
-import { RealtimeController, realtimeBadge, realtimePanelBody } from "./realtime/controller.js";
+import { RealtimeController, realtimePanelBody } from "./realtime/controller.js";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 
@@ -40,6 +41,7 @@ class ModulopApp {
     this.toastTimer = null;
     this.renderedModules = new Map();
     this.panelManager = null;
+    this.commandToolbar = null;
     this.gridManager = null;
     this.pendingInsertion = null;
     this.insertionModeId = null;
@@ -75,14 +77,7 @@ class ModulopApp {
   async init() {
     this.root.innerHTML = `
       <div class="grain" aria-hidden="true"></div>
-      <header class="profile-header" data-profile-header>
-        <button class="profile-header__identity" type="button" data-action="open-menu" aria-label="Modifier l’identité du profil">
-          <span class="profile-avatar" data-profile-avatar></span>
-          <strong data-profile-name></strong>
-        </button>
-        <button class="profile-header__live" type="button" data-action="open-live" data-live-badge aria-label="Ouvrir les présences"></button>
-        <button class="profile-header__menu" type="button" data-action="open-menu" data-tooltip="Ouvrir le menu" aria-label="Ouvrir le menu">${icon("Menu")}</button>
-      </header>
+      <div class="command-toolbar-host" data-command-toolbar></div>
       <main class="workspace">
         <section class="welcome-screen" data-home hidden></section>
         <section class="workspace-presence-strip" data-presence-strip hidden></section>
@@ -90,11 +85,10 @@ class ModulopApp {
         <section class="module-grid" id="module-grid"></section>
         <button class="workspace-add-fragment" type="button" data-action="open-library" data-workspace-add hidden>${icon("Plus", 18)}<span>Ajouter un fragment</span></button>
       </main>
-      <footer class="footer"><span>MODULOP ${appVersion.display}</span><button type="button" data-action="open-about">À propos</button></footer>
       <nav class="mobile-tabbar" aria-label="Navigation mobile">
         <button type="button" data-action="show-home">${icon("Compass", 19)}<span>Explorer</span></button>
         <button type="button" data-action="open-library">${icon("LayoutGrid", 19)}<span>Fragments</span></button>
-        <button type="button" data-action="open-live">${icon("Share2", 19)}<span>Partager</span></button>
+        <button type="button" data-action="open-live">${icon("Radar", 19)}<span>Présences</span></button>
       </nav>
       <div id="panel-host"></div>
       <div id="global-tooltip" class="tooltip" role="tooltip" hidden></div>
@@ -111,8 +105,15 @@ class ModulopApp {
       },
       onClose: () => this.closePanel()
     });
+    this.commandToolbar = new CommandToolbar({
+      host: this.root.querySelector("[data-command-toolbar]"),
+      getPreferences: () => this.store.profile.uiPreferences.commandToolbar || {},
+      savePreferences: (values) => {
+        this.store.mutate((profile) => Object.assign(profile.uiPreferences.commandToolbar ||= {}, values), { history: false });
+        this.renderCommandToolbar();
+      }
+    });
     this.bindGlobal();
-    this.bindStickyHeader();
     await this.realtime.init();
     this.gridManager = new GridStackManager({
       element: this.root.querySelector("#module-grid"),
@@ -122,7 +123,9 @@ class ModulopApp {
     await this.gridManager.init();
     await this.applyTemplateFromUrl();
     await this.renderWorkspace();
+    this.focusFragmentFromUrl();
     this.renderRealtimeSurfaces();
+    this.renderCommandToolbar();
   }
 
   async applyTemplateFromUrl() {
@@ -207,21 +210,6 @@ class ModulopApp {
     });
   }
 
-  bindStickyHeader() {
-    const sync = () => {
-      const atmosphere = activeAtmosphere(this.store.profile);
-      const mode = atmosphere?.header?.mode || "reveal";
-      const y = window.scrollY;
-      const expanded = mode === "always" || (mode === "reveal" && y > 120);
-      const header = this.root.querySelector("[data-profile-header]");
-      header?.classList.toggle("is-expanded", expanded);
-      header?.classList.toggle("is-compact", !expanded);
-      this.lastScrollY = y;
-    };
-    window.addEventListener("scroll", sync, { passive: true });
-    sync();
-  }
-
   handleModuleActivation(event) {
     if (event.target.closest("[data-action],a,button,input,textarea,select,[contenteditable],.ui-resizable-handle")) return;
     const module = event.target.closest(".module");
@@ -283,10 +271,6 @@ class ModulopApp {
     await applyAtmosphere(this.store.profile);
     await this.renderHome();
     this.renderBlankWorkspace();
-    const identity = this.store.profile.identity;
-    this.root.querySelector("[data-profile-name]").textContent = identity.name;
-    this.root.querySelector("[data-profile-avatar]").innerHTML = visualPreview(identity.avatar);
-    await this.resolveAssets(this.root.querySelector("[data-profile-avatar]"));
     const grid = this.root.querySelector("#module-grid");
     for (const [id, record] of this.renderedModules) {
       const next = this.store.profile.modules.find((item) => item.id === id);
@@ -307,6 +291,7 @@ class ModulopApp {
     this.bindContentInteractions();
     bindTooltips(this.root);
     this.renderRealtimeSurfaces();
+    this.renderCommandToolbar();
   }
 
   async renderHome() {
@@ -318,8 +303,8 @@ class ModulopApp {
     if (!this.homeVisible) return;
     const spaces = await this.store.profiles();
     home.innerHTML = `<section class="welcome-hero welcome-hero--compact welcome-hero--immersive">
-      <h1>Vos espaces modulaires.</h1>
-      <p>Ouvrez un espace, importez un paquet ou démarrez depuis un modèle. Chaque espace reste local, transportable et recomposable fragment par fragment.</p>
+      <h1>Vos espaces.</h1>
+      <p>Ouvrez un espace, importez un paquet ou démarrez depuis un modèle. L’espace personnel reste privé ; les autres espaces accueillent vos présences et partages.</p>
       <div class="welcome-intake welcome-intake--minimal">
         <button type="button" data-action="paste-clipboard">${icon("ClipboardPaste", 17)} Coller</button>
         <button type="button" data-action="import">${icon("FileUp", 17)} Importer</button>
@@ -327,11 +312,11 @@ class ModulopApp {
       </div>
     </section>
     <section class="welcome-section welcome-section--spaces">
-      <h2>Espaces locaux</h2>
-      <div class="space-list">${spaces.map((space) => renderSpaceCard(space)).join("") || `<p class="empty-spaces">Aucun espace local pour le moment.</p>`}</div>
+      <h2>Espaces</h2>
+      <div class="space-list">${spaces.map((space) => renderSpaceCard(space)).join("") || `<p class="empty-spaces">Aucun espace pour le moment.</p>`}</div>
     </section>
     <section class="welcome-import" data-action="import">
-      <span>${icon("FileUp", 24)}</span><strong>Importer un profil, paquet ou fragment</strong><small>Glissez-déposez un .json, .zip, .modulop.zip ou .modulop-fragment.zip, ou cliquez pour sélectionner un fichier.</small>
+      <span>${icon("FileUp", 24)}</span><strong>Importer un espace ou un fragment</strong><small>Glissez-déposez un .json, .zip, .modulop.zip ou .modulop-fragment.zip, ou cliquez pour sélectionner un fichier.</small>
     </section>
     <section class="welcome-section">
       <h2>Nouveau départ</h2>
@@ -395,6 +380,9 @@ class ModulopApp {
           <button type="button" data-action="edit-module" data-id="${module.id}">${icon("FilePenLine", 16)} Modifier le contenu</button>
           <button type="button" data-action="customize-module" data-id="${module.id}">${icon("Palette", 16)} Personnaliser le rendu</button>
           <button type="button" data-action="copy-module" data-id="${module.id}">${icon("Copy", 16)} Copier comme image</button>
+          <button type="button" data-action="copy-fragment-link" data-id="${module.id}">${icon("Link2", 16)} Copier le lien du fragment</button>
+          <button type="button" data-action="live-offer-fragment" data-id="${module.id}">${icon("Radar", 16)} Proposer aux présences</button>
+          <button type="button" data-action="open-live" data-id="${module.id}">${icon("MessageCircle", 16)} Voir les traces</button>
           <button type="button" data-action="export-fragment" data-id="${module.id}">${icon("PackageOpen", 16)} Exporter le fragment</button>
           <button type="button" data-action="unlock-module" data-id="${module.id}">${icon("Unlock", 16)} Déverrouiller</button>
           <button type="button" data-action="delete-module" data-id="${module.id}">${icon("Trash2", 16)} Supprimer</button>
@@ -478,7 +466,7 @@ class ModulopApp {
       this.resetRenderedGrid();
       await this.renderWorkspace();
       history.pushState(null, "", `${location.pathname}?profile=${encodeURIComponent(profile.id)}`);
-      this.announce("Nouvel espace créé");
+      this.announce("Espace créé");
     }
     if (action === "paste-clipboard") await this.pasteFromClipboard(button);
     if (action === "create-intent") {
@@ -527,6 +515,7 @@ class ModulopApp {
       this.syncOverflowMenus();
     }
     if (action === "copy-module") await this.copyModule(button, id);
+    if (action === "copy-fragment-link") await this.copyFragmentLink(button, id);
     if (action === "export-fragment") await this.exportFragment(button, id);
     if (action === "delete-module") {
       event.preventDefault();
@@ -587,17 +576,39 @@ class ModulopApp {
       await this.renderWorkspace();
       this.renderPanel();
     }
+    if (action === "save-space-settings") {
+      const title = this.root.querySelector("[data-space-title]")?.value.trim();
+      const visibility = this.root.querySelector("[data-space-visibility]")?.value || "private";
+      if (!title) {
+        this.announce("Nom d’espace requis");
+        return;
+      }
+      this.store.mutate((profile) => {
+        profile.space ||= {};
+        profile.space.title = title;
+        profile.space.visibility = visibility;
+        normalizeWorkspaceSpace(profile);
+      }, { immediate: true });
+      await this.renderWorkspace();
+      this.renderPanel();
+      this.announce("Espace mis à jour");
+    }
     if (action === "export-json") this.announce(await exportJsonProfile(this.store.profile));
     if (action === "export-zip") this.announce(await exportZipProfile(this.store.profile));
     if (action === "export-pdf") this.exportPdf();
     if (action === "import") this.root.querySelector("#import-input").click();
     if (action === "live-join") await this.realtime.connect(this.root.querySelector("[data-live-room]")?.value);
     if (action === "live-private-room") {
+      if (isPersonalSpace(this.store.profile)) {
+        this.openPanel("live");
+        this.announce("Dans l’espace personnel, partagez les fragments individuellement");
+        return;
+      }
       await this.realtime.createPrivateRoom();
       this.renderPanel();
     }
-    if (action === "live-copy-invite") await this.realtime.copyInviteLink();
-    if (action === "live-ping") await this.realtime.sendPing(`Ping ${new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}`);
+    if (action === "live-copy-invite" && !isPersonalSpace(this.store.profile)) await this.realtime.copyInviteLink();
+    if (action === "live-ping" && !isPersonalSpace(this.store.profile)) await this.realtime.sendPing(`Ping ${new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}`);
     if (action === "live-offer-fragment") await this.realtime.offerModule(this.store.profile.modules.find((item) => item.id === id));
     if (action === "live-accept-offer") await this.realtime.acceptOffer(button.dataset.offerId);
     if (action === "live-decline-offer") await this.realtime.declineOffer(button.dataset.offerId);
@@ -605,6 +616,15 @@ class ModulopApp {
     if (action === "live-discard-received") this.realtime.discardReceived(button.dataset.offerId);
     if (action === "live-block-peer") this.realtime.blockPeer(button.dataset.peerId);
     if (action === "live-unblock-peer") this.realtime.unblockPeer(button.dataset.peerId);
+    if (action === "live-focus-peer" || action === "live-focus-trace" || action === "live-focus-message") {
+      const moduleId = button.dataset.moduleId;
+      if (moduleId && this.store.profile.modules.some((item) => item.id === moduleId)) {
+        this.focusModule(moduleId);
+        this.announce("Fragment contextualisé");
+      } else {
+        this.announce("Présence contextualisée");
+      }
+    }
     if (action === "live-react") await this.realtime.toggleReaction({
       moduleId: button.dataset.moduleId,
       targetId: button.dataset.targetId,
@@ -701,6 +721,14 @@ class ModulopApp {
     this.openPanel(isAssessmentModule(module) ? "assessment" : "editor");
   }
 
+  focusModule(id) {
+    const record = this.renderedModules.get(id);
+    if (!record) return;
+    record.element.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+    record.element.focus({ preventScroll: true });
+    this.setInsertionMode(id);
+  }
+
   syncOverflowMenus() {
     this.menuCleanup?.();
     this.menuCleanup = null;
@@ -724,6 +752,16 @@ class ModulopApp {
     this.selectedId = null;
     this.realtime.setSelectedModule(null);
     this.root.querySelector("#panel-host").replaceChildren();
+    this.renderCommandToolbar();
+  }
+
+  renderCommandToolbar() {
+    this.commandToolbar?.render({
+      active: activeToolbarAction(this.panel, this.homeVisible),
+      status: this.realtimeState?.status,
+      currentSpace: currentSpaceTitle(this.store.profile)
+    });
+    bindTooltips(this.root.querySelector("[data-command-toolbar]"));
   }
 
   renderPanel() {
@@ -731,9 +769,9 @@ class ModulopApp {
     if (!this.panel) return;
     const panelScroll = this.root.querySelector(".panel__body")?.scrollTop || 0;
     const module = this.store.profile.modules.find((item) => item.id === this.selectedId);
-    if (this.panel === "menu") this.panelManager.render({ type: "menu", title: "Réglages", eyebrow: "Profil local", body: this.menuBody(), className: "panel--menu" });
+    if (this.panel === "menu") this.panelManager.render({ type: "menu", title: "Réglages", eyebrow: currentSpaceTitle(this.store.profile), body: this.menuBody(), className: "panel--menu" });
     if (this.panel === "live") {
-      this.panelManager.render({ type: "live", title: "Présences", eyebrow: "Traces éphémères", body: realtimePanelBody(this.realtimeState, this.store.profile.modules), className: "panel--live" });
+      this.panelManager.render({ type: "live", title: "Présences", eyebrow: currentSpaceTitle(this.store.profile), body: realtimePanelBody(this.realtimeState, this.store.profile.modules, this.store.profile.space), className: "panel--live" });
       this.bindRealtimePanel();
     }
     if (this.panel === "library") this.panelManager.render({ type: "library", title: "Bibliothèque", eyebrow: "Ajouter un fragment", body: this.libraryBody(), className: "panel--library" });
@@ -788,9 +826,8 @@ class ModulopApp {
   }
 
   renderRealtimeSurfaces() {
-    const badge = this.root.querySelector("[data-live-badge]");
-    if (badge) badge.innerHTML = realtimeBadge(this.realtimeState);
     this.renderPresenceStrip();
+    this.renderCommandToolbar();
     const selfId = this.realtimeState?.identity?.peerId;
     const byModule = new Map();
     for (const peer of this.realtimeState?.presence || []) {
@@ -838,6 +875,7 @@ class ModulopApp {
     const strip = this.root.querySelector("[data-presence-strip]");
     if (!strip) return;
     const modules = this.store.profile.modules || [];
+    const personal = isPersonalSpace(this.store.profile);
     strip.hidden = this.homeVisible || !modules.length;
     if (strip.hidden) return;
     const online = this.realtimeState?.status === "p2p";
@@ -849,8 +887,8 @@ class ModulopApp {
     strip.innerHTML = `
       <button class="presence-strip__status" type="button" data-action="open-live">
         <span class="live-dot ${online ? "is-online" : ""}"></span>
-        <strong>${online ? "Présences actives" : "Espace local"}</strong>
-        <small>${online ? `${Math.max(1, peers.length)} présent${peers.length > 1 ? "s" : ""}` : "verrouillé"}</small>
+        <strong>${online ? "Présences actives" : "Présences en veille"}</strong>
+        <small>${personal ? "partage fragmentaire" : online ? `${Math.max(1, peers.length)} présent${peers.length > 1 ? "s" : ""}` : "espace privé"}</small>
       </button>
       <button class="presence-strip__avatars" type="button" data-action="open-live" aria-label="Voir les présences">
         ${(remotePeers.length ? remotePeers : peers).slice(0, 5).map((peer) => `<span title="${escapeAttribute(peer.displayName || peer.nickname || "Présence")}">${visualPreview(peer.avatar)}</span>`).join("") || `<span>${icon("UserRound", 14)}</span>`}
@@ -858,7 +896,8 @@ class ModulopApp {
       <button class="presence-strip__metric" type="button" data-action="open-live">${icon("MessageCircle", 14)}<span>${comments} trace${comments > 1 ? "s" : ""}</span></button>
       <button class="presence-strip__metric" type="button" data-action="open-live">${icon("Smile", 14)}<span>${reactions}</span></button>
       <button class="presence-strip__metric" type="button" data-action="open-live">${icon("PackageOpen", 14)}<span>${offers}</span></button>
-      <button class="presence-strip__invite" type="button" data-action="live-private-room">${icon("Link", 14)}<span>Lien privé</span></button>`;
+      ${personal ? `<button class="presence-strip__invite" type="button" data-action="open-live">${icon("PackageOpen", 14)}<span>Fragments</span></button>`
+        : `<button class="presence-strip__invite" type="button" data-action="live-private-room">${icon("Link", 14)}<span>Lien privé</span></button>`}`;
   }
 
   bindRealtimePanel() {
@@ -890,11 +929,21 @@ class ModulopApp {
 
   menuBody() {
     const identity = this.store.profile.identity;
+    const personal = isPersonalSpace(this.store.profile);
+    const space = this.store.profile.space || {};
     return `
       <section class="menu-section menu-section--first"><h3>Espaces</h3><div class="menu-list">
-        <button type="button" data-action="show-home">${icon("PanelTopOpen", 18)}<span><strong>Accueil et modèles</strong><small>Créer ou ouvrir un espace local</small></span></button>
+        <button type="button" data-action="show-home">${icon("PanelTopOpen", 18)}<span><strong>Espaces et modèles</strong><small>Créer, ouvrir ou importer un espace</small></span></button>
       </div>${renderSpaceCard({ ...this.store.profile, moduleCount: this.store.profile.modules?.length || 0, assetCount: 0, template: this.store.profile.template || "custom" }, { compact: true, current: true })}</section>
-      <section class="profile-card"><span>Identité du profil</span>
+      <section class="profile-card"><span>Espace</span>
+        <label class="field"><span>Nom de l’espace</span><input data-space-title value="${escapeAttribute(currentSpaceTitle(this.store.profile))}" ${personal ? "readonly" : ""}></label>
+        <label class="field"><span>Visibilité</span><select data-space-visibility ${personal ? "disabled" : ""}>
+          ${selectValue(`<option value="private">Privé</option><option value="circle">Cercle</option><option value="public">Public</option>`, space.visibility || "private")}
+        </select></label>
+        <p class="space-policy-note">${personal ? "L’espace personnel est verrouillé. Il ne se partage jamais comme espace complet ; seuls les fragments et leurs traces peuvent circuler." : "Cet espace peut accueillir un cercle, un lien privé et des présences selon sa visibilité."}</p>
+        ${personal ? "" : `<button type="button" class="soft-button is-primary" data-action="save-space-settings">${icon("Check", 16)} Enregistrer l’espace</button>`}
+      </section>
+      <section class="profile-card"><span>Identité de présence</span>
         ${this.identityEditing ? `<label class="field"><span>Nom affiché</span><input data-identity-name value="${escapeAttribute(identity.name)}" autofocus></label>
           <div class="inline-actions"><button type="button" class="soft-button" data-action="cancel-identity">Annuler</button><button type="button" class="soft-button is-primary" data-action="save-identity">Enregistrer</button></div>`
           : `<div class="identity-summary"><span class="profile-avatar profile-avatar--large">${visualPreview(identity.avatar)}</span><strong>${escapeHtml(identity.name)}</strong></div>
@@ -907,9 +956,9 @@ class ModulopApp {
         <button type="button" data-action="open-live">${icon("Radar", 18)}<span><strong>Présences</strong><small>Traces, commentaires et fragments proposés</small></span></button>
       </div></section>
       <section class="menu-section"><h3>Données</h3><div class="data-actions">
-        <button type="button" data-action="import">${fileBadge("IMPORT")}${icon("Upload", 18)}<span><strong>Importer</strong><small>Profil ou fragment MODULOP</small></span></button>
-        <button type="button" data-action="export-json">${fileBadge(".JSON")}${icon("FileJson", 18)}<span><strong>Exporter JSON</strong><small>Profil sans médias</small></span></button>
-        <button type="button" data-action="export-zip">${fileBadge(".ZIP")}${icon("FileArchive", 18)}<span><strong>Exporter ZIP</strong><small>Profil autonome</small></span></button>
+        <button type="button" data-action="import">${fileBadge("IMPORT")}${icon("Upload", 18)}<span><strong>Importer</strong><small>Espace ou fragment</small></span></button>
+        <button type="button" data-action="export-json">${fileBadge(".JSON")}${icon("FileJson", 18)}<span><strong>Exporter JSON</strong><small>Espace sans médias</small></span></button>
+        <button type="button" data-action="export-zip">${fileBadge(".ZIP")}${icon("FileArchive", 18)}<span><strong>Exporter ZIP</strong><small>Espace autonome</small></span></button>
         <button type="button" data-action="export-pdf">${fileBadge(".PDF")}${icon("FileText", 18)}<span><strong>Exporter PDF</strong><small>Impression statique</small></span></button>
         <button type="button" data-action="reset-profile" class="danger-row">${fileBadge("RESET")}${icon("RotateCcw", 18)}<span><strong>Réinitialiser l’application</strong><small>Supprime espaces, médias et consentements</small></span></button>
       </div></section>`;
@@ -1106,7 +1155,7 @@ class ModulopApp {
     if (classification.kind === "portable-json") {
       const confirmed = await confirmAt(this.root, {
         title: "Importer ce profil JSON ?",
-        message: "Le texte collé ressemble à un profil MODULOP. Il sera ajouté comme nouvel espace local.",
+        message: "Le texte collé ressemble à un espace exporté. Il sera ajouté comme nouvel espace.",
         confirmLabel: "Importer"
       });
       if (!confirmed) return;
@@ -1279,6 +1328,29 @@ class ModulopApp {
     }
   }
 
+  async copyFragmentLink(anchor, id) {
+    const module = this.store.profile.modules.find((item) => item.id === id);
+    if (!module) return;
+    const url = new URL(location.href);
+    url.searchParams.set("profile", this.store.profile.id);
+    url.searchParams.set("fragment", id);
+    url.searchParams.delete("home");
+    try {
+      await navigator.clipboard?.writeText?.(url.toString());
+      this.announce("Lien du fragment copié");
+    } catch {
+      this.announce(url.toString());
+    }
+    this.menuFor = null;
+    this.syncOverflowMenus();
+    anchor?.focus?.();
+  }
+
+  focusFragmentFromUrl() {
+    const fragmentId = new URLSearchParams(location.search).get("fragment");
+    if (fragmentId) requestAnimationFrame(() => this.focusModule(fragmentId));
+  }
+
   downloadBlob(blob, name) {
     const url = URL.createObjectURL(blob);
     const link = Object.assign(document.createElement("a"), { href: url, download: name });
@@ -1303,11 +1375,16 @@ class ModulopApp {
     if (!id) return;
     const profile = await db.profiles.get(id);
     if (!profile) return;
-    const name = prompt("Nouveau nom de l’espace", profile.identity?.name || "Espace MODULOP")?.trim();
+    normalizeProfile(profile);
+    if (isPersonalSpace(profile)) {
+      this.announce("L’espace personnel reste verrouillé");
+      return;
+    }
+    const name = prompt("Nouveau nom de l’espace", currentSpaceTitle(profile))?.trim();
     if (!name) return;
-    profile.identity ||= {};
-    profile.identity.name = name;
-    profile.identity.source = "custom";
+    profile.space ||= {};
+    profile.space.title = name;
+    normalizeWorkspaceSpace(profile);
     profile.updatedAt = new Date().toISOString();
     await db.profiles.put(profile);
     if (this.store.profile.id === id) this.store.profile = profile;
@@ -1325,9 +1402,19 @@ class ModulopApp {
 
   async deleteSpace(anchor, id) {
     if (!id) return;
-    const confirmed = await confirmAt(anchor, { title: "Supprimer cet espace ?", message: "Cet espace local sera retiré de ce navigateur.", confirmLabel: "Supprimer" });
+    const target = await db.profiles.get(id);
+    if (target) normalizeProfile(target);
+    if (target && isPersonalSpace(target)) {
+      this.announce("L’espace personnel ne peut pas être supprimé");
+      return;
+    }
+    const confirmed = await confirmAt(anchor, { title: "Supprimer cet espace ?", message: "Cet espace sera retiré de ce navigateur.", confirmLabel: "Supprimer" });
     if (!confirmed) return;
-    await this.store.deleteSpace(id);
+    const deleted = await this.store.deleteSpace(id);
+    if (!deleted) {
+      this.announce("Cet espace est verrouillé");
+      return;
+    }
     this.resetRenderedGrid();
     await this.renderWorkspace();
     this.announce("Espace supprimé");
@@ -1379,13 +1466,19 @@ class ModulopApp {
       }
       const confirmed = await confirmAt(anchor || null, {
         title: "Importer ce fichier ?",
-        message: `${file.name} sera ajouté comme espace local et deviendra l’espace actif.`,
+        message: `${file.name} sera ajouté comme espace et deviendra l’espace actif.`,
         confirmLabel: "Importer"
       });
       if (!confirmed) return;
       const profile = await importProfile(file);
       if (profile.schemaVersion !== 1 || !Array.isArray(profile.modules)) throw new Error();
       normalizeProfile(profile);
+      if (isPersonalSpace(profile)) {
+        profile.space.kind = "workspace";
+        profile.space.locked = false;
+        profile.space.title = "Espace importé";
+        normalizeWorkspaceSpace(profile);
+      }
       const existing = profile.id ? await db.profiles.get(profile.id) : null;
       if (!profile.id || existing) profile.id = crypto.randomUUID();
       profile.updatedAt = new Date().toISOString();
@@ -1397,9 +1490,9 @@ class ModulopApp {
       this.resetRenderedGrid();
       await this.renderWorkspace();
       history.pushState(null, "", `${location.pathname}?profile=${encodeURIComponent(profile.id)}`);
-      this.announce(fromDrop ? "Fichier importé depuis le dépôt" : "Fichier MODULOP importé");
+      this.announce(fromDrop ? "Fichier importé depuis le dépôt" : "Espace importé");
     } catch {
-      this.announce("Fichier MODULOP invalide");
+      this.announce("Fichier invalide");
     }
   }
 
@@ -1512,7 +1605,7 @@ function rangeField(label, path, value, min, max, suffix) {
 
 function profileTemplates() {
   return [
-    { id: "blank", label: "Profil vierge", icon: "FilePlus2", description: "Une page minimale pour construire librement." },
+    { id: "blank", label: "Espace vierge", icon: "FilePlus2", description: "Une page minimale pour construire librement." },
     { id: "starter", label: "Starter personnel", icon: "Shapes", description: "Objets, portrait et mode d’emploi." },
     { id: "tests", label: "Tests & questionnaires", icon: "ListChecks", description: "SEC, SIC, TPACK, IPIP et passations." },
     { id: "portfolio", label: "Portfolio narratif", icon: "Milestone", description: "Chronique, ressources et récit." },
@@ -1543,16 +1636,17 @@ function searchSelect(path, label, options, value) {
 
 function renderSpaceCard(space, { compact = false, current = false } = {}) {
   const modules = Array.isArray(space.modules) ? space.modules : [];
-  const name = space.identity?.name || "Espace MODULOP";
+  const personal = isPersonalSpace(space);
+  const name = currentSpaceTitle(space);
   const count = space.moduleCount ?? modules.length;
   const icons = modules.slice(0, compact ? 5 : 8).map((module) => {
     const definition = moduleCatalog.find((item) => item.type === module.type);
     return `<span title="${escapeAttribute(module.title || definition?.label || "Fragment")}">${icon(definition?.icon || "PanelTop", compact ? 13 : 15)}</span>`;
   }).join("");
   const overflow = modules.length > (compact ? 5 : 8) ? `<em>+${modules.length - (compact ? 5 : 8)}</em>` : "";
-  const template = space.template || "custom";
+  const template = personal ? "privé verrouillé" : visibilityLabel(space.space?.visibility);
   const updated = space.updatedAt ? new Date(space.updatedAt).toLocaleDateString("fr-FR") : "Aujourd’hui";
-  return `<article class="space-card ${compact ? "space-card--compact" : ""} ${current ? "is-current" : ""}" data-space-id="${space.id}">
+  return `<article class="space-card ${compact ? "space-card--compact" : ""} ${current ? "is-current" : ""} ${personal ? "is-locked" : ""}" data-space-id="${space.id}">
     <button type="button" class="space-card__main" data-action="open-space" data-profile-id="${space.id}">
       <span class="space-card__avatar">${visualPreview(space.identity?.avatar)}</span>
       <span class="space-card__copy">
@@ -1566,7 +1660,8 @@ function renderSpaceCard(space, { compact = false, current = false } = {}) {
       <button type="button" data-action="rename-space" data-profile-id="${space.id}" data-tooltip="Renommer">${icon("Pencil", 15)}</button>
       <button type="button" data-action="export-space-zip" data-profile-id="${space.id}" data-tooltip="Exporter ZIP">${icon("FileArchive", 15)}</button>
       <button type="button" data-action="export-space-json" data-profile-id="${space.id}" data-tooltip="Exporter JSON">${icon("FileJson", 15)}</button>
-      <button type="button" data-action="delete-space" data-profile-id="${space.id}" data-tooltip="Supprimer" aria-label="Supprimer cet espace">${icon("Trash2", 15)}</button>
+      ${personal ? `<button type="button" disabled data-tooltip="Espace personnel verrouillé" aria-label="Espace personnel verrouillé">${icon("LockKeyhole", 15)}</button>`
+        : `<button type="button" data-action="delete-space" data-profile-id="${space.id}" data-tooltip="Supprimer" aria-label="Supprimer cet espace">${icon("Trash2", 15)}</button>`}
     </div>
   </article>`;
 }
@@ -1765,6 +1860,28 @@ function applyModulePresentation(element, options) {
     "--module-motion": options.motion ? options.motion / 100 : ""
   };
   Object.entries(properties).forEach(([key, value]) => value === "" ? element.style.removeProperty(key) : element.style.setProperty(key, value));
+}
+
+function currentSpaceTitle(profile = {}) {
+  return profile.space?.title || profile.identity?.name || "Espace";
+}
+
+function isPersonalSpace(profile = {}) {
+  return profile.space?.kind === "personal" || Boolean(profile.space?.locked);
+}
+
+function visibilityLabel(visibility = "private") {
+  return ({ private: "privé", circle: "cercle", public: "public" })[visibility] || "privé";
+}
+
+function activeToolbarAction(panel, homeVisible) {
+  if (homeVisible) return "show-home";
+  if (panel === "library") return "open-library";
+  if (panel === "live") return "open-live";
+  if (panel === "atmosphere") return "open-atmosphere";
+  if (panel === "menu") return "open-menu";
+  if (panel === "about") return "open-about";
+  return "";
 }
 
 function isAssessmentModule(module) {

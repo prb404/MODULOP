@@ -74,7 +74,7 @@ describe("couche realtime P2P", () => {
     expect(reaction.payload.annotation.length).toBeLessThanOrEqual(80);
   });
 
-  it("expose constellation, carte publique et ping dans le panneau Live", () => {
+  it("expose constellation, carte publique et ping dans un espace créé", () => {
     const html = realtimePanelBody({
       identity: { peerId: "a".repeat(24) },
       roomId: DEFAULT_ROOM,
@@ -91,15 +91,39 @@ describe("couche realtime P2P", () => {
       offers: [{ offerId: "o1", title: "Fragment proposé", size: 1024 }],
       receivedFragments: [{ offerId: "r1", title: "Fragment reçu" }],
       blockedPeers: []
-    }, [{ id: "m1", title: "Fragment public", type: "rich-text" }]);
+    }, [{ id: "m1", title: "Fragment public", type: "rich-text" }], { kind: "workspace", visibility: "circle", locked: false });
 
     expect(html).toContain("live-peer-graph");
     expect(html).toContain("data-action=\"live-ping\"");
     expect(html).toContain("live-peer-card");
-    expect(html).toContain("Espace local verrouillé");
+    expect(html).toContain("Cet espace peut accueillir un cercle");
     expect(html).toContain("data-action=\"live-decline-offer\"");
     expect(html).toContain("data-action=\"live-discard-received\"");
     expect(html).toContain("Pair Atelier");
+  });
+
+  it("masque l’invitation globale dans l’espace personnel", () => {
+    const html = realtimePanelBody({
+      identity: { peerId: "a".repeat(24) },
+      roomId: DEFAULT_ROOM,
+      enabled: false,
+      status: "local",
+      presence: [],
+      messages: [],
+      comments: [],
+      reactions: [],
+      activity: [],
+      offers: [],
+      receivedFragments: [],
+      blockedPeers: [],
+      privateRoom: true,
+      inviteUrl: "https://example.test/#room=secret"
+    }, [{ id: "m1", title: "Fragment", type: "rich-text" }], { kind: "personal", title: "Espace personnel", visibility: "private", locked: true });
+
+    expect(html).toContain("Espace personnel verrouillé");
+    expect(html).toContain("Proposez uniquement des fragments");
+    expect(html).not.toContain("data-action=\"live-copy-invite\"");
+    expect(html).not.toContain("data-action=\"live-ping\"");
   });
 
   it("génère une invitation privée avec clé hors room et chiffre les payloads", async () => {

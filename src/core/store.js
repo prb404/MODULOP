@@ -1,8 +1,9 @@
 import Dexie from "dexie";
-import { createModule, createProfileFromTemplate, moduleCatalog } from "./profile.js";
+import { createModule, createProfileFromTemplate, moduleCatalog, PERSONAL_SPACE_TITLE } from "./profile.js";
 import { remoteResources } from "./remote-resources.js";
 
 export const db = new Dexie("modulop-v36");
+export const PERSONAL_PROFILE_KEY = "personalProfileId";
 db.version(1).stores({
   profiles: "id,updatedAt",
   assets: "id,createdAt,type",
@@ -24,12 +25,30 @@ export class ProfileStore extends EventTarget {
     this.profile = activeId?.value ? await db.profiles.get(activeId.value) : await db.profiles.orderBy("updatedAt").last();
     if (!this.profile || this.profile.schemaVersion !== 1) {
       this.profile = createProfileFromTemplate("blank");
+      markPersonalSpace(this.profile);
       await db.profiles.put(this.profile);
       await db.preferences.put({ key: "activeProfileId", value: this.profile.id });
+      await db.preferences.put({ key: PERSONAL_PROFILE_KEY, value: this.profile.id });
     } else if (normalizeProfile(this.profile)) {
       await db.profiles.put(this.profile);
     }
+    await this.ensurePersonalSpace();
     return this.profile;
+  }
+
+  async ensurePersonalSpace() {
+    const personal = await db.preferences.get(PERSONAL_PROFILE_KEY);
+    let personalProfile = personal?.value ? await db.profiles.get(personal.value) : null;
+    if (!personalProfile) {
+      const all = await db.profiles.orderBy("updatedAt").toArray();
+      personalProfile = all.find((profile) => profile.space?.kind === "personal") || this.profile;
+      markPersonalSpace(personalProfile);
+      await db.profiles.put(personalProfile);
+      await db.preferences.put({ key: PERSONAL_PROFILE_KEY, value: personalProfile.id });
+    } else if (markPersonalSpace(personalProfile) || normalizeProfile(personalProfile)) {
+      await db.profiles.put(personalProfile);
+    }
+    if (this.profile?.id === personalProfile.id) this.profile = personalProfile;
   }
 
   async profiles() {
@@ -53,6 +72,7 @@ export class ProfileStore extends EventTarget {
 
   async createSpace(template = "blank") {
     this.profile = createProfileFromTemplate(template);
+    normalizeWorkspaceSpace(this.profile);
     normalizeProfile(this.profile);
     await db.profiles.put(this.profile);
     await db.preferences.put({ key: "activeProfileId", value: this.profile.id });
@@ -75,14 +95,19 @@ export class ProfileStore extends EventTarget {
   }
 
   async deleteSpace(id) {
+    const personal = await db.preferences.get(PERSONAL_PROFILE_KEY);
+    const target = await db.profiles.get(id);
+    if (personal?.value === id || target?.space?.kind === "personal" || target?.space?.locked) return false;
     await db.profiles.delete(id);
     if (this.profile?.id === id) {
       this.profile = await db.profiles.orderBy("updatedAt").last() || createProfileFromTemplate("blank");
+      if (this.profile.space?.kind !== "personal") normalizeWorkspaceSpace(this.profile);
       normalizeProfile(this.profile);
       await db.profiles.put(this.profile);
       await db.preferences.put({ key: "activeProfileId", value: this.profile.id });
       this.dispatchEvent(new CustomEvent("change", { detail: this.profile }));
     }
+    return true;
   }
 
   snapshot() {
@@ -141,8 +166,10 @@ export class ProfileStore extends EventTarget {
       await db.profiles.clear();
       await db.assets.clear();
       this.profile = createProfileFromTemplate("blank");
+      markPersonalSpace(this.profile);
       await db.profiles.put(this.profile);
       await db.preferences.put({ key: "activeProfileId", value: this.profile.id });
+      await db.preferences.put({ key: PERSONAL_PROFILE_KEY, value: this.profile.id });
     });
     this.history = [];
     this.future = [];
@@ -155,8 +182,10 @@ export class ProfileStore extends EventTarget {
       await db.assets.clear();
       await db.preferences.clear();
       this.profile = createProfileFromTemplate("blank");
+      markPersonalSpace(this.profile);
       await db.profiles.put(this.profile);
       await db.preferences.put({ key: "activeProfileId", value: this.profile.id });
+      await db.preferences.put({ key: PERSONAL_PROFILE_KEY, value: this.profile.id });
     });
     remoteResources.clear();
     await clearBrowserCaches();
@@ -199,17 +228,29 @@ export function normalizeProfile(profile) {
   if (!profile || profile.schemaVersion !== 1) return false;
   const before = JSON.stringify({
     template: profile.template,
+    space: profile.space,
     uiPreferences: profile.uiPreferences,
     realtimeTraces: profile.realtimeTraces,
     moduleLayouts: profile.modules?.map((module) => [module.id, module.type, module.layout, module.presentation])
   });
   profile.template ||= "custom";
+  profile.space ||= {
+    kind: "workspace",
+    title: profile.identity?.name || "Espace",
+    visibility: "private",
+    locked: false,
+    createdAt: profile.updatedAt || new Date().toISOString()
+  };
+  if (profile.space.kind === "personal") markPersonalSpace(profile);
+  else normalizeWorkspaceSpace(profile);
   profile.uiPreferences ||= {};
   profile.realtimeTraces ||= {};
   profile.realtimeTraces.comments = Array.isArray(profile.realtimeTraces.comments) ? profile.realtimeTraces.comments.filter(Boolean).slice(-240) : [];
   profile.realtimeTraces.reactions = Array.isArray(profile.realtimeTraces.reactions) ? profile.realtimeTraces.reactions.filter(Boolean).slice(-400) : [];
   profile.uiPreferences.moduleActions ||= {};
   profile.uiPreferences.moduleActions.visibleShortcuts = clampNumber(profile.uiPreferences.moduleActions.visibleShortcuts, 1, 3, 1);
+  profile.uiPreferences.commandToolbar ||= {};
+  profile.uiPreferences.commandToolbar = normalizeToolbarPreferences(profile.uiPreferences.commandToolbar);
   profile.uiPreferences.panels ||= {};
   const defaults = createProfileFromTemplate("blank").uiPreferences.panels;
   Object.entries(defaults).forEach(([key, value]) => {
@@ -219,11 +260,56 @@ export function normalizeProfile(profile) {
   profile.updatedAt ||= new Date().toISOString();
   const after = JSON.stringify({
     template: profile.template,
+    space: profile.space,
     uiPreferences: profile.uiPreferences,
     realtimeTraces: profile.realtimeTraces,
     moduleLayouts: profile.modules?.map((module) => [module.id, module.type, module.layout, module.presentation])
   });
   return before !== after;
+}
+
+export function markPersonalSpace(profile) {
+  if (!profile) return false;
+  const before = JSON.stringify(profile.space);
+  profile.space = {
+    kind: "personal",
+    title: PERSONAL_SPACE_TITLE,
+    visibility: "private",
+    locked: true,
+    createdAt: profile.space?.createdAt || profile.updatedAt || new Date().toISOString()
+  };
+  return before !== JSON.stringify(profile.space);
+}
+
+export function normalizeWorkspaceSpace(profile) {
+  if (!profile) return false;
+  const before = JSON.stringify(profile.space);
+  profile.space = {
+    kind: profile.space?.kind === "personal" ? "personal" : "workspace",
+    title: profile.space?.title || profile.identity?.name || "Espace",
+    visibility: ["private", "circle", "public"].includes(profile.space?.visibility) ? profile.space.visibility : "private",
+    locked: Boolean(profile.space?.kind === "personal" || profile.space?.locked),
+    createdAt: profile.space?.createdAt || profile.updatedAt || new Date().toISOString()
+  };
+  if (profile.space.kind === "personal") {
+    profile.space.title = PERSONAL_SPACE_TITLE;
+    profile.space.visibility = "private";
+    profile.space.locked = true;
+  }
+  return before !== JSON.stringify(profile.space);
+}
+
+function normalizeToolbarPreferences(prefs = {}) {
+  const defaultOrder = ["spaces", "fragments", "presence", "import", "appearance", "settings", "help"];
+  const order = Array.isArray(prefs.order) ? prefs.order.filter((item) => defaultOrder.includes(item)) : [];
+  return {
+    edge: ["left", "right", "top", "bottom", "free"].includes(prefs.edge) ? prefs.edge : "left",
+    x: clampNumber(prefs.x, 0, 4096, 18),
+    y: clampNumber(prefs.y, 0, 4096, 120),
+    size: clampNumber(prefs.size, 44, 72, 48),
+    expanded: Boolean(prefs.expanded),
+    order: [...order, ...defaultOrder.filter((item) => !order.includes(item))]
+  };
 }
 
 function normalizeModule(module) {

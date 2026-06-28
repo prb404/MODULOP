@@ -391,23 +391,24 @@ export function realtimeBadge(state) {
   return `<span class="live-dot ${online ? "is-online" : ""}"></span><strong>${online ? "Présences" : "Local"}</strong><small>${count} présent${count > 1 ? "s" : ""}</small>`;
 }
 
-export function realtimePanelBody(state, modules = []) {
+export function realtimePanelBody(state, modules = [], space = {}) {
   const online = state.status === "p2p";
   const peers = state.presence || [];
+  const personal = space?.kind === "personal" || space?.locked;
   const invite = state.privateRoom && state.inviteUrl ? state.inviteUrl : "";
   return `<section class="live-panel">
     <section class="live-command">
-      <div class="live-command__status">${icon(state.privateRoom ? "LockKeyhole" : "Radar", 24)}<span><strong>${online ? "Présences actives" : "Espace local"}</strong><small>${escapeHtml(state.privateRoom ? "Lien privé actif" : "Votre espace reste privé")}</small></span></div>
-      <label class="switch-row switch-row--compact"><span>Présences</span><input type="checkbox" data-live-enabled ${state.enabled ? "checked" : ""}></label>
+      <div class="live-command__status">${icon(personal ? "LockKeyhole" : state.privateRoom ? "LockKeyhole" : "Radar", 24)}<span><strong>${online ? "Présences actives" : "Présences en veille"}</strong><small>${personal ? "Espace personnel verrouillé" : state.privateRoom ? "Lien privé actif" : "Espace configurable"}</small></span></div>
+      <label class="presence-switch"><input type="checkbox" data-live-enabled ${state.enabled ? "checked" : ""}><span><i></i><strong>Présence</strong><small>${online ? "visible dans le cercle" : "activer la coprésence"}</small></span></label>
       <label class="field"><span>Cercle</span><input data-live-room value="${escapeAttribute(state.roomId)}"></label>
       <div class="inline-actions">
         <button type="button" class="soft-button is-primary" data-action="live-join">${icon("Radar", 16)} Se rendre présent</button>
-        <button type="button" class="soft-button" data-action="live-private-room">${icon("Fingerprint", 16)} Lien privé</button>
-        ${invite ? `<button type="button" class="soft-button" data-action="live-copy-invite">${icon("Link", 16)} Inviter</button>` : ""}
-        <button type="button" class="soft-button" data-action="live-ping">${icon("RadioTower", 16)} Ping</button>
+        ${personal ? "" : `<button type="button" class="soft-button" data-action="live-private-room">${icon("Fingerprint", 16)} Lien privé</button>`}
+        ${!personal && invite ? `<button type="button" class="soft-button" data-action="live-copy-invite">${icon("Link", 16)} Inviter</button>` : ""}
+        ${personal ? "" : `<button type="button" class="soft-button" data-action="live-ping">${icon("RadioTower", 16)} Ping</button>`}
       </div>
-      ${invite ? `<label class="field live-invite-link"><span>Lien privé chiffré</span><input readonly value="${escapeAttribute(invite)}"></label>` : ""}
-      <p class="live-local-note">Espace local verrouillé. L’espace complet ne se partage pas ; seuls les fragments voyagent quand vous les proposez.</p>
+      ${!personal && invite ? `<label class="field live-invite-link"><span>Lien privé chiffré</span><input readonly value="${escapeAttribute(invite)}"></label>` : ""}
+      <p class="live-local-note">${personal ? "L’espace personnel ne reçoit pas d’invitation globale. Proposez uniquement des fragments et leurs traces." : "Cet espace peut accueillir un cercle, un lien privé et des échanges contextuels."}</p>
     </section>
     <section class="live-zones">
       <details class="live-zone live-zone--circle" open>
@@ -435,9 +436,9 @@ export function realtimePanelBody(state, modules = []) {
 
 function renderPeer(peer, state) {
   const self = peer.peerId === state?.identity?.peerId;
-  return `<article class="live-peer">
+  return `<article class="live-peer" data-peer-id="${escapeAttribute(peer.peerId)}">
     <span class="live-peer__avatar">${visualPreview(peer.avatar)}</span>
-    <span><strong>${escapeHtml(peer.displayName || peer.nickname || "Présence")}</strong><small>${peer.moduleCount || 0} fragment${peer.moduleCount > 1 ? "s" : ""} · ${peer.traceCount || 0} trace${peer.traceCount > 1 ? "s" : ""}${peer.selectedModuleId ? " · actif sur un fragment" : ""}</small></span>
+    <button type="button" class="live-peer__main" data-action="live-focus-peer" data-peer-id="${escapeAttribute(peer.peerId)}" data-module-id="${escapeAttribute(peer.selectedModuleId || "")}"><strong>${escapeHtml(peer.displayName || peer.nickname || "Présence")}</strong><small>${peer.moduleCount || 0} fragment${peer.moduleCount > 1 ? "s" : ""} · ${peer.traceCount || 0} trace${peer.traceCount > 1 ? "s" : ""}${peer.selectedModuleId ? " · actif sur un fragment" : ""}</small></button>
     <code>${escapeHtml(shortPeerId(peer.peerId))}</code>
     ${self ? "" : `<button type="button" data-action="live-block-peer" data-peer-id="${escapeAttribute(peer.peerId)}">${icon("ShieldOff", 15)}</button>`}
     <dl class="live-peer-card">
@@ -468,7 +469,7 @@ function renderPeerGraph(peers, state) {
   });
   const selfNode = nodes.find((node) => node.self) || nodes[0];
   const links = nodes.filter((node) => node !== selfNode).map((node) => `<line x1="${selfNode.x}" y1="${selfNode.y}" x2="${node.x}" y2="${node.y}"></line>`).join("");
-  const renderedNodes = nodes.map((node) => `<g class="${node.self ? "is-self" : ""}" transform="translate(${node.x} ${node.y})">
+  const renderedNodes = nodes.map((node) => `<g class="${node.self ? "is-self" : ""}" transform="translate(${node.x} ${node.y})" data-action="live-focus-peer" data-peer-id="${escapeAttribute(node.peer.peerId)}" data-module-id="${escapeAttribute(node.peer.selectedModuleId || "")}" tabindex="0">
     <circle r="${node.self ? 9 : 7}"></circle>
     <text y="18">${escapeHtml(peerInitials(node.peer))}</text>
     <title>${escapeHtml(node.peer.displayName || node.peer.nickname || node.peer.peerId || "Présence")}</title>
@@ -480,14 +481,14 @@ function renderPeerGraph(peers, state) {
 }
 
 function renderMessage(message) {
-  return `<article class="live-message ${message.local ? "is-local" : ""}"><strong>${message.kind === "ping" ? "Ping" : "Message"}</strong><p>${escapeHtml(message.text)}</p><small>${new Date(message.createdAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</small></article>`;
+  return `<button type="button" class="live-message ${message.local ? "is-local" : ""}" data-action="live-focus-message" data-peer-id="${escapeAttribute(message.from || "")}"><strong>${message.kind === "ping" ? "Ping" : "Message"}</strong><p>${escapeHtml(message.text)}</p><small>${new Date(message.createdAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</small></button>`;
 }
 
 function renderActivity(item) {
-  return `<article class="live-activity">
+  return `<button type="button" class="live-activity" data-action="live-focus-trace" data-module-id="${escapeAttribute(item.moduleId || "")}" data-peer-id="${escapeAttribute(item.actorId || "")}">
     <span>${activityIcon(item.type)}</span>
     <div><strong>${escapeHtml(activityLabel(item))}</strong><small>${escapeHtml(item.actorName)} · ${new Date(item.createdAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</small></div>
-  </article>`;
+  </button>`;
 }
 
 function activityIcon(type) {
@@ -527,7 +528,7 @@ function renderDiscussion(module, state) {
 
 function renderComment(comment, state) {
   const reactions = (state.reactions || []).filter((reaction) => reaction.targetId === comment.id);
-  return `<article class="live-comment">
+  return `<article class="live-comment" data-module-id="${escapeAttribute(comment.moduleId)}">
     <p>${escapeHtml(comment.text)}</p>
     <div class="live-comment__meta">
       <small>${new Date(comment.createdAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}</small>

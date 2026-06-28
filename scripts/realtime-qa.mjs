@@ -50,14 +50,16 @@ async function runRealtimeQa(browser) {
     await openLivePanel(beta.page);
     await joinRoom(alpha.page, roomId);
     await joinRoom(beta.page, roomId);
+    const discoveredBeforeTransfer = await waitForPeerDiscovery(alpha.page, beta.page, 30000);
+    if (!discoveredBeforeTransfer) throw new Error(`Aucune presence distante detectee avant transfert fragmentaire dans ${roomId}`);
 
     await alpha.page.locator("[data-action='live-ping']").click();
     await sendChat(alpha.page, "Message QA P2P alpha");
     await addFragmentComment(alpha.page, "Commentaire QA fragment");
-    await alpha.page.locator("[data-action='live-offer-fragment']").first().click();
+    await alpha.page.locator("#panel-host [data-action='live-offer-fragment']").first().click();
     await acceptAndImportOfferedFragment(beta.page);
     await openLivePanel(beta.page);
-    await alpha.page.locator("[data-action='live-offer-fragment']").first().click();
+    await alpha.page.locator("#panel-host [data-action='live-offer-fragment']").first().click();
     await declineOfferedFragment(beta.page);
 
     await assertVisible(alpha.page, ".live-peer-graph", "constellation alpha");
@@ -96,7 +98,7 @@ async function createClient(browser, label) {
 async function setupWorkspace(page, label) {
   await page.goto(`${baseUrl}?home=1`, { waitUntil: "domcontentloaded", timeout: 20000 });
   await assertVisible(page, ".welcome-hero", `accueil ${label}`);
-  await page.getByRole("button", { name: /Profil vierge/i }).click();
+  await page.getByRole("button", { name: /Espace vierge/i }).click();
   await page.waitForSelector(".blank-workspace:not([hidden])", { timeout: 12000 });
   await page.locator(".blank-workspace [data-action='open-library']").click();
   await page.locator(".catalog-card[data-type='rich-text']").click();
@@ -112,11 +114,11 @@ async function joinRoom(page, room) {
   await page.locator("[data-live-room]").fill(room);
   await page.locator("[data-action='live-join']").evaluate((button) => button.click());
   try {
-    await page.waitForFunction(() => document.querySelector(".profile-header__live")?.innerText.includes("Présences"), null, { timeout: 12000 });
+    await page.waitForFunction(() => document.querySelector(".live-command__status")?.innerText.includes("Présences actives"), null, { timeout: 12000 });
     await page.waitForSelector(".live-peer", { timeout: 12000 });
   } catch (error) {
     const state = await page.evaluate(() => ({
-      badge: document.querySelector("[data-live-badge]")?.innerText || "",
+      status: document.querySelector(".live-command__status")?.innerText || "",
       panel: document.querySelector(".live-panel")?.innerText || "",
       checked: document.querySelector("[data-live-enabled]")?.checked ?? null,
       room: document.querySelector("[data-live-room]")?.value || "",
@@ -157,8 +159,10 @@ async function declineOfferedFragment(page) {
   await page.waitForFunction(() => !document.querySelector("[data-action='live-decline-offer']"), null, { timeout: 8000 });
 }
 
-async function waitForPeerDiscovery(...pages) {
-  const deadline = Date.now() + 14000;
+async function waitForPeerDiscovery(...args) {
+  const timeout = typeof args.at(-1) === "number" ? args.pop() : 14000;
+  const pages = args;
+  const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     const counts = await Promise.all(pages.map((page) => page.locator(".live-peer").count().catch(() => 0)));
     if (counts.some((count) => count > 1)) return true;
@@ -169,14 +173,14 @@ async function waitForPeerDiscovery(...pages) {
 
 async function assertLiveHealthy(page, label) {
   const state = await page.evaluate(() => ({
-    status: document.querySelector("[data-live-badge]")?.innerText || "",
+    status: document.querySelector(".live-command__status")?.innerText || "",
     panel: document.querySelector(".live-panel")?.innerText || "",
     circle: document.querySelector("[data-live-room]")?.value || "",
     moduleCount: document.querySelectorAll(".module[data-load-state='ready']").length,
     livePeers: document.querySelectorAll(".live-peer").length,
     horizontalOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth
   }));
-  if (!state.status.includes("Présences")) throw new Error(`${label}: badge Présences absent\n${JSON.stringify(state, null, 2)}`);
+  if (!state.status.includes("Présences")) throw new Error(`${label}: statut Présences absent\n${JSON.stringify(state, null, 2)}`);
   if (state.circle !== roomId) throw new Error(`${label}: cercle absent du panneau Présences\n${JSON.stringify(state, null, 2)}`);
   if (state.moduleCount < 1) throw new Error(`${label}: aucun fragment pret\n${JSON.stringify(state, null, 2)}`);
   if (state.livePeers < 1) throw new Error(`${label}: presence locale absente\n${JSON.stringify(state, null, 2)}`);
