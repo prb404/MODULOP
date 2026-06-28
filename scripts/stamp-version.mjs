@@ -1,4 +1,4 @@
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
@@ -13,7 +13,8 @@ const iteration = [
   pad(now.getMinutes()),
   pad(now.getSeconds())
 ].join("");
-const majorMinorPatch = "4.0.0";
+const packageJson = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
+const majorMinorPatch = packageJson.version;
 
 await writeFile(resolve(root, "src/core/version.js"), `export const appVersion = {
   majorMinorPatch: "${majorMinorPatch}",

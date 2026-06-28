@@ -134,10 +134,19 @@ function linkCard(module) {
   </a>`;
 }
 
+function media(module) {
+  const src = module.data.src || module.data.asset || "";
+  if (!src) return `<div class="media-fragment media-fragment--empty"><span>${escapeHtml(module.data.title || module.title)}</span><strong>Image locale</strong><p>Collez ou déposez une image pour créer un fragment média.</p></div>`;
+  return `<figure class="media-fragment media-fragment--${escapeHtml(module.variant || "poster")}">
+    <div class="media-fragment__frame"><img src="${escapeHtml(src)}" alt="${escapeHtml(module.data.alt || module.data.title || "")}"></div>
+    <figcaption><strong>${escapeHtml(module.data.title || module.title)}</strong>${module.data.caption ? `<span>${escapeHtml(module.data.caption)}</span>` : ""}</figcaption>
+  </figure>`;
+}
+
 function embed(module) {
   const resolved = resolveEmbed(module.data.input || module.data.src);
   if (!resolved) return `<div class="remote-fallback"><strong>Intégration non reconnue</strong><p>Seules les URL HTTPS de fournisseurs autorisés sont acceptées.</p></div>`;
-  const consent = remoteResources.status(resolved.src);
+  const consent = remoteResources.status(resolved.src, "embed");
   if (consent !== "allowed") return `<div class="remote-fallback">
     <span class="eyebrow">${escapeHtml(resolved.domain)}</span>
     <strong>Contenu distant bloqué</strong>
@@ -169,6 +178,7 @@ const definitions = {
   personality: manifest("personality-assessment", "html", ["cards", "bars", "radar", "donut", "spectre"], efficacy, null, null, assessmentSchema()),
   cognitive: manifest("cognitive-assessment", "html", ["cards", "bars", "radar"], cognitive, null, null, assessmentSchema()),
   gardner: manifest("gardner-echarts", "echarts", ["radar", "bars", "orbit"], gardner, mountGardner, destroyMounted, assessmentSchema()),
+  media: manifest("media-local", "html", ["poster", "full", "caption"], media, null, null, { variant: { type: "variant", label: "Composition" } }),
   "link-card": manifest("link-card", "html", ["compact", "editorial"], linkCard, null, null, { visual: { type: "visual", label: "Aperçu" }, variant: { type: "variant", label: "Composition" } }),
   embed: manifest("embed-safe", "iframe", ["responsive"], embed, null, null, { ratio: { type: "choice", label: "Ratio", options: ["16/9", "4/3", "1/1"] }, consent: { type: "remote-consent", label: "Domaine" } })
 };

@@ -1,6 +1,6 @@
 {
   "name": "modulop",
-  "version": "0.3.0",
+  "version": "4.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,6 +10,10 @@
     "preview": "vite preview --host 127.0.0.1 --port 8080",
     "test": "vitest run",
     "check": "npm run test && npm run build",
+    "qa:browser": "node scripts/browser-qa.mjs",
+    "release:patch": "npm version patch --no-git-tag-version && npm run version:stamp",
+    "release:minor": "npm version minor --no-git-tag-version && npm run version:stamp",
+    "release:major": "npm version major --no-git-tag-version && npm run version:stamp",
     "version:stamp": "node scripts/stamp-version.mjs"
   },
   "dependencies": {
@@ -35,11 +39,13 @@
     "marked": "^18.0.5",
     "material-symbols": "^0.45.1",
     "three": "^0.184.0",
+    "trystero": "^0.25.2",
     "vite": "^6.4.2"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.2.5",
     "jsdom": "^26.0.0",
+    "playwright-core": "^1.61.0",
     "vitest": "^4.1.9"
   },
   "overrides": {

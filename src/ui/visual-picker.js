@@ -16,10 +16,19 @@ export function visualPreview(value) {
   return `<img src="${escapeHtml(src)}" alt="${escapeHtml(ref.alt || "")}" loading="lazy">`;
 }
 
-export function visualPickerField(value, path, label = "Visuel") {
+export function visualPickerField(value, path, label = "Visuel", options = {}) {
   const ref = visualRef(value);
   const isGenerated = ref.kind === "dicebear";
   const canRegenerate = ref.kind === "initials" || ref.kind === "dicebear";
+  const allowedKinds = options.allowedKinds || ["initials", "emoji", "icon", "asset", "remote", "dicebear"];
+  const kindButtons = [
+    ["initials", "Initiales", "BKS"],
+    ["emoji", "Emoji", "☕"],
+    ["icon", "Icône", icon("Sparkles", 18)],
+    ["asset", "Image locale", icon("ImagePlus", 18)],
+    ["remote", "URL distante", icon("Link", 18)],
+    ["dicebear", "Généré", "DB"]
+  ].filter(([kind]) => allowedKinds.includes(kind));
   return `<fieldset class="visual-field" data-visual-field data-path="${path}">
     <legend>${label}</legend>
     <div class="visual-field__summary">
@@ -31,12 +40,7 @@ export function visualPickerField(value, path, label = "Visuel") {
       ${canRegenerate ? `<button type="button" class="soft-button visual-regenerate" data-visual-regenerate>${icon("RefreshCw", 15)} Régénérer</button>` : ""}
     </div>
     <div class="visual-kind-grid" role="listbox" aria-label="Type de visuel">
-      ${visualKindButton("initials", "Initiales", "BKS", ref.kind)}
-      ${visualKindButton("emoji", "Emoji", "☕", ref.kind)}
-      ${visualKindButton("icon", "Icône", icon("Sparkles", 18), ref.kind)}
-      ${visualKindButton("asset", "Image locale", icon("ImagePlus", 18), ref.kind)}
-      ${visualKindButton("remote", "URL distante", icon("Link", 18), ref.kind)}
-      ${visualKindButton("dicebear", "Généré", "DB", ref.kind)}
+      ${kindButtons.map(([kind, buttonLabel, preview]) => visualKindButton(kind, buttonLabel, preview, ref.kind)).join("")}
     </div>
     ${isGenerated ? `<div class="visual-generated-presets" aria-label="Suggestions d’avatars générés">${diceBearStyles().map((style) => `<button type="button" class="${style === (ref.style || "shapes") ? "is-active" : ""}" data-visual-style="${style}" aria-pressed="${style === (ref.style || "shapes")}"><span>${visualPreview({ ...ref, kind: "dicebear", style, seed: `${ref.seed || "modulop"}-${style}`, fallback: style.slice(0, 2).toUpperCase() })}</span><strong>${style}</strong></button>`).join("")}</div>` : ""}
     <div data-visual-options>${visualOptions(ref)}</div>
@@ -72,6 +76,23 @@ export function bindVisualPickers(root, patch, announce) {
       ref.fg = readableTextColor(event.target.value);
     }));
     field.querySelector("[data-visual-icon]")?.addEventListener("input", (event) => update((ref) => { ref.name = event.target.value; }));
+    field.querySelectorAll("[data-visual-icon-choice]").forEach((button) => button.addEventListener("click", () => update((ref) => { ref.name = button.dataset.visualIconChoice; }, true)));
+    field.querySelector("[data-visual-icon-search]")?.addEventListener("input", (event) => {
+      const query = event.target.value.toLowerCase();
+      field.querySelectorAll("[data-visual-icon-choice]").forEach((button) => {
+        button.hidden = !button.dataset.search.includes(query);
+      });
+    });
+    field.querySelector("[data-emoji-open]")?.addEventListener("click", async () => {
+      await import("emoji-picker-element");
+      const popover = field.querySelector("[data-emoji-popover]");
+      popover.hidden = !popover.hidden;
+      popover.querySelector("emoji-picker")?.focus?.();
+    });
+    field.querySelector("emoji-picker")?.addEventListener("emoji-click", (event) => {
+      const emoji = event.detail?.unicode || event.detail?.emoji?.unicode;
+      if (emoji) update((ref) => { ref.value = emoji; }, true);
+    });
     field.querySelector("[data-visual-url]")?.addEventListener("change", (event) => update((ref) => { ref.src = event.target.value; }, true));
     field.querySelector("[data-visual-seed]")?.addEventListener("input", (event) => update((ref) => { ref.seed = event.target.value; }));
     field.querySelectorAll("[data-visual-style]").forEach((button) => button.addEventListener("click", () => update((ref) => { ref.style = button.dataset.visualStyle; }, true)));
@@ -90,8 +111,16 @@ function visualOptions(ref) {
     <label class="field"><span>Initiales</span><input data-visual-value maxlength="3" value="${escapeAttribute(ref.initials || "MO")}"></label>
     <label class="field"><span>Fond</span><input type="color" data-visual-bg value="${escapeAttribute(ref.bg || "#31433a")}"></label>
   </div>`;
-  if (ref.kind === "emoji") return `<label class="field"><span>Emoji</span><input data-visual-value value="${escapeAttribute(ref.value || "◇")}"></label>`;
-  if (ref.kind === "icon") return `<label class="field"><span>Nom Lucide</span><input data-visual-icon value="${escapeAttribute(ref.name || "Sparkles")}" placeholder="Sparkles"></label>`;
+  if (ref.kind === "emoji") return `<div class="visual-emoji-picker">
+    <label class="field"><span>Emoji</span><input data-visual-value value="${escapeAttribute(ref.value || "◇")}"></label>
+    <button type="button" class="soft-button" data-emoji-open>${icon("Smile", 16)} Parcourir</button>
+    <div class="visual-emoji-popover" data-emoji-popover hidden><emoji-picker locale="fr"></emoji-picker></div>
+  </div>`;
+  if (ref.kind === "icon") return `<div class="visual-icon-picker">
+    <label class="field"><span>Rechercher une icône Lucide</span><input data-visual-icon-search value="${escapeAttribute(ref.name || "")}" placeholder="Sparkles, Image, Link…"></label>
+    <input type="hidden" data-visual-icon value="${escapeAttribute(ref.name || "Sparkles")}">
+    <div class="visual-icon-grid">${iconChoices().map((name) => `<button type="button" class="${name === (ref.name || "Sparkles") ? "is-active" : ""}" data-visual-icon-choice="${name}" data-search="${name.toLowerCase()}">${icon(name, 17)}<span>${escapeHtml(name)}</span></button>`).join("")}</div>
+  </div>`;
   if (ref.kind === "asset") return `<label class="drop-field">${icon("ImagePlus", 18)} Choisir ou déposer une image<input type="file" accept="image/*" data-visual-file></label>`;
   if (ref.kind === "remote") {
     const url = ref.src || "https://example.invalid";
@@ -121,6 +150,16 @@ function visualKindButton(value, label, preview, selected) {
 
 function diceBearStyles() {
   return ["shapes", "bottts", "lorelei", "notionists", "thumbs"];
+}
+
+function iconChoices() {
+  return [
+    "Sparkles", "Image", "ImagePlus", "Link", "FileText", "NotebookTabs", "Shapes", "CircleDot",
+    "Orbit", "Radar", "Network", "BrainCircuit", "Activity", "UsersRound", "GraduationCap",
+    "MonitorCog", "Waypoints", "Route", "Fingerprint", "Milestone", "Coffee", "Music",
+    "Camera", "Leaf", "Gamepad2", "BookOpen", "Lightbulb", "Map", "Compass", "Star",
+    "Heart", "Zap", "Palette", "WandSparkles"
+  ];
 }
 
 function kindLabel(kind) {

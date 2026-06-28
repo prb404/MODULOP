@@ -1,9 +1,9 @@
 import "gridstack/dist/gridstack.min.css";
 import "./styles.css";
-import { toBlob } from "html-to-image";
 import { createModule, generateProfileName, moduleCatalog } from "./core/profile.js";
-import { ProfileStore, db, resolveAsset } from "./core/store.js";
-import { exportJsonProfile, exportZipProfile, importProfile } from "./core/portable.js";
+import { ProfileStore, db, normalizeProfile, resolveAsset, saveAsset } from "./core/store.js";
+import { exportFragmentPackage, exportJsonProfile, exportZipProfile, importFragmentPackage, importProfile } from "./core/portable.js";
+import { classifyFileInput, classifyTextInput, createMediaModule, createModuleFromTextClassification } from "./core/ingest.js";
 import { renderModuleContent, mountModule, destroyModule, escapeHtml } from "./renderers/index.js";
 import { editorBody, mountEditor, destroyEditor, assessmentBody, mountAssessment, appearanceBody, mountAppearanceEditor } from "./editors/index.js";
 import { icon, iconButton } from "./ui/icons.js";
@@ -22,6 +22,7 @@ import { MorphologyEngine, lockMorphologySection } from "./core/morphology.js";
 import { creditsMarkdown } from "./core/component-sources.js";
 import { initialsAvatar } from "./core/visuals.js";
 import { appVersion } from "./core/version.js";
+import { RealtimeController, realtimeBadge, realtimePanelBody } from "./realtime/controller.js";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 
@@ -48,13 +49,26 @@ class ModulopApp {
     this.menuCleanup = null;
     this.hasHydratedGrid = false;
     this.identityEditing = false;
+    this.realtime = new RealtimeController({
+      getProfile: () => this.store.profile,
+      importModule: (module, message) => this.insertModule(module, message),
+      announce: (message) => this.announce(message)
+    });
+    this.realtimeState = this.realtime.snapshot();
     const params = new URLSearchParams(location.search);
     this.homeVisible = params.has("home") || (!params.has("template") && !params.has("profile"));
     this.consentFilter = "active";
     this.lastScrollY = 0;
     this.resizeTimer = null;
     this.dragDepth = 0;
+    this.homeIntent = "";
     this.store.addEventListener("status", (event) => this.updateSaveState(event.detail));
+    this.store.addEventListener("change", () => this.realtime.syncProfile());
+    this.realtime.addEventListener("change", (event) => {
+      this.realtimeState = event.detail;
+      this.renderRealtimeSurfaces();
+      if (this.panel === "live") this.renderPanel();
+    });
   }
 
   async init() {
@@ -65,16 +79,17 @@ class ModulopApp {
           <span class="profile-avatar" data-profile-avatar></span>
           <strong data-profile-name></strong>
         </button>
+        <button class="profile-header__live" type="button" data-action="open-live" data-live-badge aria-label="Ouvrir la coprésence"></button>
         <button class="profile-header__menu" type="button" data-action="open-menu" data-tooltip="Ouvrir le menu" aria-label="Ouvrir le menu">${icon("Menu")}</button>
       </header>
-      <main class="workspace"><section class="welcome-screen" data-home hidden></section><section class="module-grid" id="module-grid"></section></main>
+      <main class="workspace"><section class="welcome-screen" data-home hidden></section><section class="blank-workspace" data-blank-workspace hidden></section><section class="module-grid" id="module-grid"></section></main>
       <footer class="footer"><span>MODULOP ${appVersion.display}</span><button type="button" data-action="open-about">À propos</button></footer>
       <div id="panel-host"></div>
       <div id="global-tooltip" class="tooltip" role="tooltip" hidden></div>
       <div class="toast" role="status" aria-live="polite"></div>
-      <div class="drop-overlay" data-drop-overlay hidden><div>${icon("FileArchive", 34)}<strong>Déposez votre fichier MODULOP</strong><span>.json, .zip ou .modulop.zip</span></div></div>
+      <div class="drop-overlay" data-drop-overlay hidden><div>${icon("FileArchive", 34)}<strong>Déposez un contenu</strong><span>Image, texte, URL, .json, .zip, .modulop.zip ou fragment autonome</span></div></div>
       <div class="sr-only" data-grid-announcer aria-live="assertive"></div>
-      <input id="import-input" type="file" accept=".json,.zip,.modulop.zip,application/json,application/zip" hidden>`;
+      <input id="import-input" type="file" accept=".json,.zip,.modulop.zip,.modulop-fragment.zip,application/json,application/zip" hidden>`;
     this.panelManager = new PanelManager({
       host: this.root.querySelector("#panel-host"),
       getPreferences: (type) => this.store.profile.uiPreferences.panels[type] || {},
@@ -86,6 +101,7 @@ class ModulopApp {
     });
     this.bindGlobal();
     this.bindStickyHeader();
+    await this.realtime.init();
     this.gridManager = new GridStackManager({
       element: this.root.querySelector("#module-grid"),
       onLayout: (layouts) => this.saveGridLayout(layouts),
@@ -94,6 +110,7 @@ class ModulopApp {
     await this.gridManager.init();
     await this.applyTemplateFromUrl();
     await this.renderWorkspace();
+    this.renderRealtimeSurfaces();
   }
 
   async applyTemplateFromUrl() {
@@ -112,6 +129,7 @@ class ModulopApp {
   bindGlobal() {
     this.root.addEventListener("click", (event) => this.handleAction(event));
     this.root.addEventListener("click", (event) => this.handleModuleActivation(event));
+    this.root.addEventListener("dblclick", (event) => this.handlePrimaryDoubleClick(event));
     this.root.addEventListener("pointerdown", (event) => this.beginLongPress(event));
     this.root.addEventListener("pointermove", (event) => this.trackLongPress(event));
     this.root.addEventListener("pointerup", () => this.cancelLongPress());
@@ -146,11 +164,12 @@ class ModulopApp {
       this.menuFor = null;
       this.syncOverflowMenus();
     }, true);
+    document.addEventListener("paste", (event) => this.handlePaste(event));
   }
 
   bindGlobalDrop() {
     const overlay = () => this.root.querySelector("[data-drop-overlay]");
-    const valid = (event) => Array.from(event.dataTransfer?.items || []).some((item) => item.kind === "file");
+    const valid = (event) => Array.from(event.dataTransfer?.items || []).some((item) => item.kind === "file" || item.kind === "string");
     window.addEventListener("dragenter", (event) => {
       if (!valid(event)) return;
       this.dragDepth += 1;
@@ -166,12 +185,13 @@ class ModulopApp {
       if (!this.dragDepth) overlay().hidden = true;
     });
     window.addEventListener("drop", async (event) => {
-      const [file] = Array.from(event.dataTransfer?.files || []).filter(isPortableFile);
-      if (!file) return;
+      const files = Array.from(event.dataTransfer?.files || []);
+      const text = event.dataTransfer?.getData("text/plain") || event.dataTransfer?.getData("text/uri-list") || "";
+      if (!files.length && !text.trim()) return;
       event.preventDefault();
       this.dragDepth = 0;
       overlay().hidden = true;
-      await this.importFile(file, { anchor: overlay(), fromDrop: true });
+      await this.ingestDroppedContent({ files, text, anchor: overlay() });
     });
   }
 
@@ -232,6 +252,7 @@ class ModulopApp {
   setInsertionMode(id) {
     const next = id && this.insertionModeId !== id ? id : null;
     this.insertionModeId = next;
+    this.realtime.setSelectedModule(next);
     for (const [moduleId, record] of this.renderedModules) {
       const active = moduleId === next;
       record.widget.classList.toggle("is-insertion-active", active);
@@ -249,6 +270,7 @@ class ModulopApp {
   async renderWorkspace() {
     await applyAtmosphere(this.store.profile);
     await this.renderHome();
+    this.renderBlankWorkspace();
     const identity = this.store.profile.identity;
     this.root.querySelector("[data-profile-name]").textContent = identity.name;
     this.root.querySelector("[data-profile-avatar]").innerHTML = visualPreview(identity.avatar);
@@ -262,9 +284,10 @@ class ModulopApp {
         this.renderedModules.delete(id);
       }
     }
-    for (const module of this.store.profile.modules) await this.upsertModule(module, grid);
-    if (!this.hasHydratedGrid) {
-      this.gridManager.compact();
+    if (!this.homeVisible && this.store.profile.modules.length) {
+      this.gridManager.beginBatch();
+      for (const module of this.store.profile.modules) await this.upsertModule(module, grid);
+      this.gridManager.endBatch();
       this.hasHydratedGrid = true;
     }
     this.bindContentInteractions();
@@ -276,22 +299,24 @@ class ModulopApp {
     const grid = this.root.querySelector("#module-grid");
     if (!home) return;
     home.hidden = !this.homeVisible;
-    grid.hidden = this.homeVisible;
+    grid.hidden = this.homeVisible || !this.store.profile.modules?.length;
     if (!this.homeVisible) return;
     const spaces = await this.store.profiles();
-    home.innerHTML = `<section class="welcome-hero welcome-hero--compact">
+    home.innerHTML = `<section class="welcome-hero welcome-hero--compact welcome-hero--immersive">
       <h1>Vos espaces modulaires.</h1>
-      <p>Ouvrez un espace, importez un paquet ou démarrez depuis un modèle.</p>
+      <p>Ouvrez un espace, importez un paquet ou démarrez depuis un modèle. Chaque espace reste local, transportable et recomposable fragment par fragment.</p>
+      <div class="welcome-intake welcome-intake--minimal">
+        <button type="button" data-action="paste-clipboard">${icon("ClipboardPaste", 17)} Coller</button>
+        <button type="button" data-action="import">${icon("FileUp", 17)} Importer</button>
+        <button type="button" data-action="open-library">${icon("Plus", 17)} Bibliothèque</button>
+      </div>
     </section>
     <section class="welcome-section welcome-section--spaces">
       <h2>Espaces locaux</h2>
-      <div class="space-list">${spaces.map((space) => `<article class="space-card"><button type="button" data-action="open-space" data-profile-id="${space.id}">
-        <span>${visualPreview(space.identity?.avatar)}</span><strong>${escapeHtml(space.identity?.name || "Profil")}</strong>
-        <small>${escapeHtml(space.template || "custom")} · ${space.moduleCount || 0} fragments · ${new Date(space.updatedAt).toLocaleDateString("fr-FR")}</small>
-      </button><button type="button" data-action="delete-space" data-profile-id="${space.id}" aria-label="Supprimer cet espace">${icon("Trash2", 16)}</button></article>`).join("") || `<p class="empty-spaces">Aucun espace local pour le moment.</p>`}</div>
+      <div class="space-list">${spaces.map((space) => renderSpaceCard(space)).join("") || `<p class="empty-spaces">Aucun espace local pour le moment.</p>`}</div>
     </section>
     <section class="welcome-import" data-action="import">
-      <span>${icon("FileUp", 24)}</span><strong>Importer un profil ou paquet</strong><small>Glissez-déposez un .json, .zip ou .modulop.zip, ou cliquez pour sélectionner un fichier.</small>
+      <span>${icon("FileUp", 24)}</span><strong>Importer un profil, paquet ou fragment</strong><small>Glissez-déposez un .json, .zip, .modulop.zip ou .modulop-fragment.zip, ou cliquez pour sélectionner un fichier.</small>
     </section>
     <section class="welcome-section">
       <h2>Nouveau départ</h2>
@@ -300,6 +325,26 @@ class ModulopApp {
       </button>`).join("")}</div>
     </section>`;
     await this.resolveAssets(home);
+  }
+
+  renderBlankWorkspace() {
+    const blank = this.root.querySelector("[data-blank-workspace]");
+    const grid = this.root.querySelector("#module-grid");
+    if (!blank) return;
+    const visible = !this.homeVisible && !this.store.profile.modules?.length;
+    blank.hidden = !visible;
+    if (grid) grid.hidden = this.homeVisible || visible;
+    if (!visible) return;
+    blank.innerHTML = `<div class="blank-workspace__drop">
+      <span>${icon("Sparkles", 34)}</span>
+      <strong>Espace vierge</strong>
+      <p>Déposez une image, collez une URL, importez un fragment autonome ou ouvrez la bibliothèque. Le premier contenu devient le premier fragment de la grille.</p>
+      <div class="blank-workspace__actions">
+        <button type="button" data-action="paste-clipboard">${icon("ClipboardPaste", 17)} Coller</button>
+        <button type="button" data-action="import">${icon("FileUp", 17)} Importer</button>
+        <button type="button" data-action="open-library">${icon("Plus", 17)} Bibliothèque</button>
+      </div>
+    </div>`;
   }
 
   async upsertModule(module, grid) {
@@ -323,17 +368,19 @@ class ModulopApp {
     element.tabIndex = 0;
     applyModulePresentation(element, module.presentation?.options || {});
     const definition = moduleCatalog.find((item) => item.type === module.type);
+    const quickActions = moduleQuickActions(module, this.store.profile.uiPreferences?.moduleActions?.visibleShortcuts ?? 1);
     element.innerHTML = `
       ${module.type === "rich-text" ? "" : `<header class="module__header" title="Maintenir et déplacer"><span>${icon(definition?.icon || "Box", 16)}</span><h2>${escapeHtml(module.title)}</h2></header>`}
       <div class="module__content">${renderModuleContent(module)}</div>
       <div class="module-tools" aria-label="Actions pour ${escapeHtml(module.title)}">
-        ${isAssessmentModule(module) ? iconButton({ icon: "ListChecks", label: `Passer ${module.title}`, action: "take-assessment", id: module.id }) : iconButton({ icon: "Pencil", label: `Modifier ${module.title}`, action: "edit-module", id: module.id })}
-        ${iconButton({ icon: "Copy", label: `Copier ${module.title} comme image`, action: "copy-module", id: module.id })}
+        ${quickActions.map((action) => iconButton({ ...action, id: module.id })).join("")}
         ${iconButton({ icon: "Ellipsis", label: "Plus d’actions", action: "module-menu", id: module.id })}
         <div class="module-overflow" data-menu-for="${module.id}" hidden>
-          ${isAssessmentModule(module) ? `<button type="button" data-action="edit-module" data-id="${module.id}">${icon("FilePenLine", 16)} Modifier le test</button>` : ""}
-          <button type="button" data-action="customize-module" data-id="${module.id}">${icon("Palette", 16)} Personnaliser</button>
-          <button type="button" data-action="surprise-module" data-id="${module.id}">${icon("Sparkles", 16)} Surprenez-moi</button>
+          ${isAssessmentModule(module) ? `<button type="button" data-action="take-assessment" data-id="${module.id}">${icon("ListChecks", 16)} Passer</button>` : ""}
+          <button type="button" data-action="edit-module" data-id="${module.id}">${icon("FilePenLine", 16)} Modifier le contenu</button>
+          <button type="button" data-action="customize-module" data-id="${module.id}">${icon("Palette", 16)} Personnaliser le rendu</button>
+          <button type="button" data-action="copy-module" data-id="${module.id}">${icon("Copy", 16)} Copier comme image</button>
+          <button type="button" data-action="export-fragment" data-id="${module.id}">${icon("PackageOpen", 16)} Exporter le fragment</button>
           <button type="button" data-action="unlock-module" data-id="${module.id}">${icon("Unlock", 16)} Déverrouiller</button>
           <button type="button" data-action="delete-module" data-id="${module.id}">${icon("Trash2", 16)} Supprimer</button>
         </div>
@@ -343,18 +390,15 @@ class ModulopApp {
     insertions?.setAttribute("aria-label", `Ajouter près de ${module.title}`);
     this.renderedModules.set(module.id, { module: structuredClone(module), element, widget });
     element.dataset.loadState = "loading";
-    element.dataset.loadProgress = "0";
-    element.style.setProperty("--load-progress", "0");
+    setModuleProgress(element, 12);
     try {
-      element.dataset.loadProgress = "35";
-      element.style.setProperty("--load-progress", "35");
+      await nextFrame();
+      setModuleProgress(element, 42);
       await mountModule(module, element);
-      element.dataset.loadProgress = "85";
-      element.style.setProperty("--load-progress", "85");
+      setModuleProgress(element, 78);
       await this.resolveAssets(element);
       requestAnimationFrame(() => {
-        element.dataset.loadProgress = "100";
-        element.style.setProperty("--load-progress", "100");
+        setModuleProgress(element, 100);
         element.dataset.loadState = "ready";
       });
     } catch (error) {
@@ -401,6 +445,7 @@ class ModulopApp {
     if (!button) return;
     const { action, id } = button.dataset;
     if (action === "open-menu") this.openPanel("menu");
+    if (action === "open-live") this.openPanel("live");
     if (action === "open-about") this.openPanel("about");
     if (action === "open-consents") {
       this.consentFilter = button.dataset.filter || this.consentFilter || "active";
@@ -420,6 +465,15 @@ class ModulopApp {
       history.pushState(null, "", `${location.pathname}?profile=${encodeURIComponent(profile.id)}`);
       this.announce("Nouvel espace créé");
     }
+    if (action === "paste-clipboard") await this.pasteFromClipboard(button);
+    if (action === "create-intent") {
+      const value = this.currentIntentValue();
+      if (!value) {
+        this.announce("Écrivez une intention à transformer en fragment");
+        return;
+      }
+      await this.ingestText(value, { message: "Intention transformée en fragment" });
+    }
     if (action === "open-space") {
       const profile = await this.store.openSpace(button.dataset.profileId);
       this.homeVisible = false;
@@ -427,6 +481,9 @@ class ModulopApp {
       await this.renderWorkspace();
       if (profile) history.pushState(null, "", `${location.pathname}?profile=${encodeURIComponent(profile.id)}`);
     }
+    if (action === "rename-space") await this.renameSpace(button, button.dataset.profileId);
+    if (action === "export-space-json") await this.exportSpace(button.dataset.profileId, "json");
+    if (action === "export-space-zip") await this.exportSpace(button.dataset.profileId, "zip");
     if (action === "delete-space") await this.deleteSpace(button, button.dataset.profileId);
     if (action === "open-library") {
       this.pendingInsertion = button.dataset.anchorId
@@ -455,6 +512,7 @@ class ModulopApp {
       this.syncOverflowMenus();
     }
     if (action === "copy-module") await this.copyModule(button, id);
+    if (action === "export-fragment") await this.exportFragment(button, id);
     if (action === "delete-module") {
       event.preventDefault();
       event.stopPropagation();
@@ -518,6 +576,22 @@ class ModulopApp {
     if (action === "export-zip") this.announce(await exportZipProfile(this.store.profile));
     if (action === "export-pdf") this.exportPdf();
     if (action === "import") this.root.querySelector("#import-input").click();
+    if (action === "live-join") await this.realtime.connect(this.root.querySelector("[data-live-room]")?.value);
+    if (action === "live-private-room") {
+      this.realtime.createPrivateRoom();
+      this.renderPanel();
+    }
+    if (action === "live-offer-fragment") await this.realtime.offerModule(this.store.profile.modules.find((item) => item.id === id));
+    if (action === "live-accept-offer") await this.realtime.acceptOffer(button.dataset.offerId);
+    if (action === "live-import-received") await this.realtime.importReceived(button.dataset.offerId);
+    if (action === "live-block-peer") this.realtime.blockPeer(button.dataset.peerId);
+    if (action === "live-unblock-peer") this.realtime.unblockPeer(button.dataset.peerId);
+    if (action === "live-react") await this.realtime.toggleReaction({
+      moduleId: button.dataset.moduleId,
+      targetId: button.dataset.targetId,
+      emoji: button.dataset.emoji,
+      annotation: button.dataset.annotation
+    });
     if (action === "reset-profile") await this.resetProfile(button);
     if (action === "allow-remote") {
       let hostname = "ce domaine";
@@ -582,6 +656,32 @@ class ModulopApp {
     }
   }
 
+  async handlePrimaryDoubleClick(event) {
+    if (event.target.closest("[data-action],a,button,input,textarea,select,[contenteditable],.ui-resizable-handle")) return;
+    const space = event.target.closest(".space-card");
+    if (space?.dataset.spaceId) {
+      const profile = await this.store.openSpace(space.dataset.spaceId);
+      this.homeVisible = false;
+      this.resetRenderedGrid();
+      await this.renderWorkspace();
+      if (profile) history.pushState(null, "", `${location.pathname}?profile=${encodeURIComponent(profile.id)}`);
+      return;
+    }
+    const module = event.target.closest(".module");
+    if (module?.dataset.moduleId) {
+      event.preventDefault();
+      this.openPrimaryAction(module.dataset.moduleId);
+    }
+  }
+
+  openPrimaryAction(id) {
+    const module = this.store.profile.modules.find((item) => item.id === id);
+    if (!module) return;
+    this.selectedId = id;
+    this.realtime.setSelectedModule(id);
+    this.openPanel(isAssessmentModule(module) ? "assessment" : "editor");
+  }
+
   syncOverflowMenus() {
     this.menuCleanup?.();
     this.menuCleanup = null;
@@ -603,6 +703,7 @@ class ModulopApp {
     destroyEditor();
     this.panel = null;
     this.selectedId = null;
+    this.realtime.setSelectedModule(null);
     this.root.querySelector("#panel-host").replaceChildren();
   }
 
@@ -612,6 +713,10 @@ class ModulopApp {
     const panelScroll = this.root.querySelector(".panel__body")?.scrollTop || 0;
     const module = this.store.profile.modules.find((item) => item.id === this.selectedId);
     if (this.panel === "menu") this.panelManager.render({ type: "menu", title: "Réglages", eyebrow: "Profil local", body: this.menuBody(), className: "panel--menu" });
+    if (this.panel === "live") {
+      this.panelManager.render({ type: "live", title: "Coprésence", eyebrow: "P2P éphémère", body: realtimePanelBody(this.realtimeState, this.store.profile.modules), className: "panel--live" });
+      this.bindRealtimePanel();
+    }
     if (this.panel === "library") this.panelManager.render({ type: "library", title: "Bibliothèque", eyebrow: "Ajouter un fragment", body: this.libraryBody(), className: "panel--library" });
     if (this.panel === "about") this.panelManager.render({ type: "about", title: "À propos", eyebrow: "Crédits", body: this.aboutBody(), className: "panel--about" });
     if (this.panel === "consents") this.panelManager.render({ type: "consents", title: "Consentements", eyebrow: "Ressources distantes", body: this.consentsBody(), className: "panel--consents" });
@@ -663,12 +768,70 @@ class ModulopApp {
     });
   }
 
+  renderRealtimeSurfaces() {
+    const badge = this.root.querySelector("[data-live-badge]");
+    if (badge) badge.innerHTML = realtimeBadge(this.realtimeState);
+    const selfId = this.realtimeState?.identity?.peerId;
+    const byModule = new Map();
+    for (const peer of this.realtimeState?.presence || []) {
+      if (!peer.selectedModuleId || peer.peerId === selfId) continue;
+      const peers = byModule.get(peer.selectedModuleId) || [];
+      peers.push(peer);
+      byModule.set(peer.selectedModuleId, peers);
+    }
+    for (const [moduleId, record] of this.renderedModules) {
+      const peers = byModule.get(moduleId) || [];
+      let marker = record.element.querySelector("[data-live-module-presence]");
+      if (!peers.length) {
+        marker?.remove();
+        record.element.removeAttribute("data-live-count");
+        continue;
+      }
+      if (!marker) {
+        marker = document.createElement("div");
+        marker.className = "live-module-presence";
+        marker.dataset.liveModulePresence = "";
+        record.element.append(marker);
+      }
+      record.element.dataset.liveCount = String(peers.length);
+      marker.innerHTML = peers.slice(0, 4).map((peer) => `<span title="${escapeAttribute(peer.displayName || peer.nickname || "Pair")}">${visualPreview(peer.avatar)}</span>`).join("")
+        + (peers.length > 4 ? `<strong>+${peers.length - 4}</strong>` : "");
+    }
+  }
+
+  bindRealtimePanel() {
+    const body = this.root.querySelector(".panel__body");
+    body?.querySelector("[data-live-enabled]")?.addEventListener("change", async (event) => {
+      if (event.target.checked) await this.realtime.connect(body.querySelector("[data-live-room]")?.value);
+      else await this.realtime.disconnect();
+    });
+    body?.querySelector("[data-live-room]")?.addEventListener("change", (event) => this.realtime.setRoom(event.target.value));
+    body?.querySelector("[data-live-chat-form]")?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const input = event.currentTarget.elements.message;
+      const value = input.value.trim();
+      if (!value) return;
+      await this.realtime.sendChat(value);
+      input.value = "";
+    });
+    body?.querySelectorAll("[data-live-comment-form]").forEach((form) => {
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const input = event.currentTarget.elements.comment;
+        const value = input.value.trim();
+        if (!value) return;
+        await this.realtime.addComment(event.currentTarget.dataset.moduleId, value);
+        input.value = "";
+      });
+    });
+  }
+
   menuBody() {
     const identity = this.store.profile.identity;
     return `
       <section class="menu-section menu-section--first"><h3>Espaces</h3><div class="menu-list">
         <button type="button" data-action="show-home">${icon("PanelTopOpen", 18)}<span><strong>Accueil et modèles</strong><small>Créer ou ouvrir un espace local</small></span></button>
-      </div></section>
+      </div>${renderSpaceCard({ ...this.store.profile, moduleCount: this.store.profile.modules?.length || 0, assetCount: 0, template: this.store.profile.template || "custom" }, { compact: true, current: true })}</section>
       <section class="profile-card"><span>Identité du profil</span>
         ${this.identityEditing ? `<label class="field"><span>Nom affiché</span><input data-identity-name value="${escapeAttribute(identity.name)}" autofocus></label>
           <div class="inline-actions"><button type="button" class="soft-button" data-action="cancel-identity">Annuler</button><button type="button" class="soft-button is-primary" data-action="save-identity">Enregistrer</button></div>`
@@ -679,9 +842,10 @@ class ModulopApp {
       <section class="menu-section"><div class="section-heading"><h3>Atmosphère</h3><button type="button" data-action="open-atmosphere">${icon("SlidersHorizontal", 15)} Personnaliser</button></div><div class="theme-grid">${this.store.profile.atmospheres.map((atmosphere) => `<button type="button" data-action="set-atmosphere" data-atmosphere="${atmosphere.id}" class="${this.store.profile.activeAtmosphereId === atmosphere.id ? "is-active" : ""}"><i class="theme-swatch" style="--swatch-bg:${atmosphere.colors.bg};--swatch-accent:${atmosphere.colors.accent}"></i>${escapeHtml(atmosphere.name)}</button>`).join("")}</div></section>
       <section class="menu-section"><h3>Vie privée</h3><div class="menu-list">
         <button type="button" data-action="open-consents">${icon("ShieldCheck", 18)}<span><strong>Consentements</strong><small>Services distants, embeds, images et métadonnées</small></span></button>
+        <button type="button" data-action="open-live">${icon("Radar", 18)}<span><strong>Coprésence P2P</strong><small>Présence, chat, ping et partage choisi de fragments</small></span></button>
       </div></section>
       <section class="menu-section"><h3>Données</h3><div class="data-actions">
-        <button type="button" data-action="import">${fileBadge("IMPORT")}${icon("Upload", 18)}<span><strong>Importer</strong><small>.JSON · .ZIP · .MODULOP.ZIP</small></span></button>
+        <button type="button" data-action="import">${fileBadge("IMPORT")}${icon("Upload", 18)}<span><strong>Importer</strong><small>Profil ou fragment MODULOP</small></span></button>
         <button type="button" data-action="export-json">${fileBadge(".JSON")}${icon("FileJson", 18)}<span><strong>Exporter JSON</strong><small>Profil sans médias</small></span></button>
         <button type="button" data-action="export-zip">${fileBadge(".ZIP")}${icon("FileArchive", 18)}<span><strong>Exporter ZIP</strong><small>Profil autonome</small></span></button>
         <button type="button" data-action="export-pdf">${fileBadge(".PDF")}${icon("FileText", 18)}<span><strong>Exporter PDF</strong><small>Impression statique</small></span></button>
@@ -762,6 +926,7 @@ class ModulopApp {
   async insertModule(created, message) {
     const insertion = this.pendingInsertion ? { ...this.pendingInsertion } : null;
     this.store.mutate((profile) => profile.modules.push(created), { immediate: true });
+    this.homeVisible = false;
     this.closePanel();
     await this.renderWorkspace();
     if (insertion) {
@@ -770,7 +935,91 @@ class ModulopApp {
       if (anchor && record) this.gridManager.positionNear(record.widget, this.effectiveLayout(anchor), insertion.direction, created.layout);
     }
     this.pendingInsertion = null;
+    history.pushState(null, "", `${location.pathname}?profile=${encodeURIComponent(this.store.profile.id)}`);
     this.announce(message);
+  }
+
+  async handlePaste(event) {
+    if (event.target.closest("input,textarea,[contenteditable]")) return;
+    const files = Array.from(event.clipboardData?.files || []);
+    const text = event.clipboardData?.getData("text/plain") || "";
+    if (!files.length && !text.trim()) return;
+    event.preventDefault();
+    await this.ingestDroppedContent({ files, text, anchor: this.root });
+  }
+
+  async pasteFromClipboard(anchor) {
+    try {
+      if (navigator.clipboard?.read) {
+        const items = await navigator.clipboard.read();
+        const imageItem = items.find((item) => item.types.some((type) => type.startsWith("image/")));
+        if (imageItem) {
+          const type = imageItem.types.find((itemType) => itemType.startsWith("image/"));
+          await this.ingestImageBlob(await imageItem.getType(type), "image-collée", "Image collée");
+          return;
+        }
+      }
+      const text = await navigator.clipboard?.readText?.();
+      if (text?.trim()) {
+        await this.ingestText(text, { message: "Presse-papier transformé en fragment" });
+        return;
+      }
+    } catch {}
+    this.announce("Presse-papier inaccessible depuis ce navigateur");
+    anchor?.focus?.();
+  }
+
+  currentIntentValue() {
+    const fields = [...this.root.querySelectorAll("[data-home-intent]")];
+    const visible = fields.find((field) => !field.closest("[hidden]") && field.getClientRects().length);
+    return (visible || fields.at(-1))?.value.trim() || "";
+  }
+
+  async ingestDroppedContent({ files = [], text = "", anchor = null } = {}) {
+    for (const file of files) {
+      const classification = classifyFileInput(file);
+      if (classification.kind === "portable-file") {
+        await this.importFile(file, { anchor, fromDrop: true });
+        return;
+      }
+      if (classification.kind === "image") {
+        await this.ingestImageBlob(file, file.name, "Image déposée");
+        continue;
+      }
+      if (classification.kind === "text-file") {
+        await this.ingestText(await file.text(), { message: "Fichier texte transformé en fragment" });
+        continue;
+      }
+      this.announce(`${file.name || "Fichier"} n’est pas encore pris en charge`);
+    }
+    if (text.trim()) await this.ingestText(text, { message: "Contenu transformé en fragment" });
+  }
+
+  async ingestImageBlob(blob, name, message) {
+    const asset = await saveAsset(blob, name || "image");
+    const module = createMediaModule({ asset, name, type: blob.type }, createModule);
+    await this.insertModule(module, message);
+  }
+
+  async ingestText(text, { message = "Fragment ajouté" } = {}) {
+    const classification = classifyTextInput(text);
+    if (classification.kind === "portable-json") {
+      const confirmed = await confirmAt(this.root, {
+        title: "Importer ce profil JSON ?",
+        message: "Le texte collé ressemble à un profil MODULOP. Il sera ajouté comme nouvel espace local.",
+        confirmLabel: "Importer"
+      });
+      if (!confirmed) return;
+      const file = new File([classification.text], "profil.modulop.json", { type: "application/json" });
+      await this.importFile(file, { anchor: this.root });
+      return;
+    }
+    const module = createModuleFromTextClassification(classification, createModule);
+    if (!module) {
+      this.announce("Aucun contenu exploitable à ajouter");
+      return;
+    }
+    await this.insertModule(module, message);
   }
 
   effectiveLayout(module) {
@@ -789,6 +1038,7 @@ class ModulopApp {
     const atmosphere = activeAtmosphere(this.store.profile);
     const ratio = contrastRatio(atmosphere.colors.text, atmosphere.colors.bg);
     const locks = this.store.profile.morphology.locks.atmosphere;
+    const actionShortcuts = this.store.profile.uiPreferences?.moduleActions?.visibleShortcuts ?? 1;
     const state = (section) => locks[section] ? "Verrouillé" : this.store.profile.morphology.enabled ? "Aléatoire" : "Manuel";
     const colorFields = [["bg", "Fond"], ["surface", "Surface"], ["text", "Texte"], ["accent", "Accent"], ["aqua", "Interaction"], ["acid", "Signal"]];
     const fontOptions = (category) => listFonts(category).map((font) => `<option value="${font.id}">${font.label}</option>`).join("");
@@ -816,7 +1066,7 @@ class ModulopApp {
           ${switchControl("background.animated","Dégradé vivant",atmosphere.background.animated,"Animation respectant la réduction de mouvement")}
         `,{open:true,state:state("background")})}
         ${disclosure("Typographie", `<div class="catalog-fields">${searchSelect("typography.sans", "Texte courant", listFonts("sans-serif"), atmosphere.typography.sans)}${searchSelect("typography.serif", "Titres", listFonts("serif"), atmosphere.typography.serif)}</div>${renderField("range",{label:"Échelle",name:"typography.scale",value:atmosphere.typography.scale,min:85,max:120,unit:"%",theme:atmosphere.controls.rangeTheme})}${consentControl({url:"https://fonts.bunny.net",type:"font",label:"Bunny Fonts",status:remoteResources.status("https://fonts.bunny.net","font"),description:"Catalogue typographique distant facultatif"})}`,{state:state("typography")})}
-        ${disclosure("Formes et mouvement", `${renderField("range",{label:"Rayons",name:"shape.radius",value:atmosphere.shape.radius,min:0,max:40,unit:" px",theme:atmosphere.controls.rangeTheme})}${renderField("range",{label:"Bordures",name:"shape.borderOpacity",value:atmosphere.shape.borderOpacity,min:4,max:35,unit:"%",theme:atmosphere.controls.rangeTheme})}${renderField("range",{label:"Ombres",name:"shape.shadow",value:atmosphere.shape.shadow,min:0,max:70,unit:"%",theme:atmosphere.controls.rangeTheme})}${renderField("range",{label:"Mouvement",name:"motion.intensity",value:atmosphere.motion.intensity,min:0,max:140,unit:"%",theme:atmosphere.controls.rangeTheme})}`,{state:state("shape")})}
+        ${disclosure("Formes, mouvement et actions", `${renderField("range",{label:"Rayons",name:"shape.radius",value:atmosphere.shape.radius,min:0,max:40,unit:" px",theme:atmosphere.controls.rangeTheme})}${renderField("range",{label:"Bordures",name:"shape.borderOpacity",value:atmosphere.shape.borderOpacity,min:4,max:35,unit:"%",theme:atmosphere.controls.rangeTheme})}${renderField("range",{label:"Ombres",name:"shape.shadow",value:atmosphere.shape.shadow,min:0,max:70,unit:"%",theme:atmosphere.controls.rangeTheme})}${renderField("range",{label:"Mouvement",name:"motion.intensity",value:atmosphere.motion.intensity,min:0,max:140,unit:"%",theme:atmosphere.controls.rangeTheme})}${renderField("range",{label:"Raccourcis visibles",name:"uiPreferences.moduleActions.visibleShortcuts",value:actionShortcuts,min:1,max:3,unit:"",theme:atmosphere.controls.rangeTheme})}`,{state:state("shape")})}
         ${disclosure("Style des curseurs", `<div class="slider-theme-grid">${rangeThemeCatalog().map(({ id, label }) => `<article class="slider-theme-card ${atmosphere.controls.rangeTheme===id?"is-active":""}">${renderField("range",{label,name:`preview-${id}`,value:58,min:0,max:100,theme:id})}<button type="button" data-atmosphere-choice="controls.rangeTheme" data-value="${id}" aria-pressed="${atmosphere.controls.rangeTheme===id}">Utiliser ce style</button></article>`).join("")}</div>`,{open:true,state:state("controls")})}
         ${disclosure("Header morphique", `${choiceCards("header.mode","Comportement",[{value:"off",label:"Compact",preview:"preview-header-compact"},{value:"reveal",label:"Révélé",preview:"preview-header-reveal"},{value:"always",label:"Permanent",preview:"preview-header-always"}],atmosphere.header.mode)}${choiceCards("header.effect","Transition",[{value:"glide",label:"Glissement"},{value:"fade",label:"Fondu"},{value:"scale",label:"Échelle"}],atmosphere.header.effect)}${renderField("range",{label:"Échelle du titre",name:"header.typeScale",value:atmosphere.header.typeScale,min:75,max:140,unit:"%",theme:atmosphere.controls.rangeTheme})}`,{open:true,state:state("header")})}
       </section>`;
@@ -844,11 +1094,16 @@ class ModulopApp {
     }));
     ControlRegistry.bind(root, async (path, value, input) => {
       if (path.startsWith("preview-")) return;
-      this.store.mutate((profile) => {
-        setNested(activateCustomAtmosphere(profile), path, value);
-        lockMorphologySection(profile, "atmosphere", sectionForPath(path));
-      });
-      await applyAtmosphere(this.store.profile);
+      if (path.startsWith("uiPreferences.")) {
+        this.store.mutate((profile) => setNested(profile, path, value), { immediate: true });
+        await this.renderWorkspace();
+      } else {
+        this.store.mutate((profile) => {
+          setNested(activateCustomAtmosphere(profile), path, value);
+          lockMorphologySection(profile, "atmosphere", sectionForPath(path));
+        });
+        await applyAtmosphere(this.store.profile);
+      }
       if (input?.matches("button,[type='checkbox']")) this.renderPanel();
       else {
         input?.closest(".meta-range")?.querySelector("output")?.replaceChildren(String(value));
@@ -900,6 +1155,7 @@ class ModulopApp {
     if (!element) return;
     element.classList.add("is-capturing");
     try {
+      const { toBlob } = await import("html-to-image");
       const blob = await toBlob(element, { pixelRatio: 2, cacheBust: true, backgroundColor: getComputedStyle(document.body).getPropertyValue("--bg").trim() });
       if (!blob) throw new Error();
       if (navigator.clipboard?.write && window.ClipboardItem) {
@@ -911,6 +1167,7 @@ class ModulopApp {
       }
     } catch {
       try {
+        const { toBlob } = await import("html-to-image");
         const blob = await toBlob(element, { pixelRatio: 2 });
         if (blob) this.downloadBlob(blob, `${id}.png`);
         this.announce("Presse-papier indisponible, image téléchargée");
@@ -931,7 +1188,7 @@ class ModulopApp {
 
   async deleteModule(anchor, id) {
     const module = this.store.profile.modules.find((item) => item.id === id);
-    if (!module || this.store.profile.modules.length <= 1) return;
+    if (!module) return;
     const confirmAnchor = this.renderedModules.get(id)?.element || anchor;
     this.menuFor = null;
     this.syncOverflowMenus();
@@ -940,6 +1197,30 @@ class ModulopApp {
     this.store.mutate((profile) => { profile.modules = profile.modules.filter((item) => item.id !== id); }, { immediate: true });
     await this.renderWorkspace();
     this.announce("Fragment supprimé");
+  }
+
+  async renameSpace(anchor, id) {
+    if (!id) return;
+    const profile = await db.profiles.get(id);
+    if (!profile) return;
+    const name = prompt("Nouveau nom de l’espace", profile.identity?.name || "Espace MODULOP")?.trim();
+    if (!name) return;
+    profile.identity ||= {};
+    profile.identity.name = name;
+    profile.identity.source = "custom";
+    profile.updatedAt = new Date().toISOString();
+    await db.profiles.put(profile);
+    if (this.store.profile.id === id) this.store.profile = profile;
+    await this.renderWorkspace();
+    this.renderPanel();
+    anchor?.focus?.();
+    this.announce("Espace renommé");
+  }
+
+  async exportSpace(id, format) {
+    const profile = id === this.store.profile.id ? this.store.profile : await db.profiles.get(id);
+    if (!profile) return;
+    this.announce(format === "json" ? await exportJsonProfile(profile) : await exportZipProfile(profile));
   }
 
   async deleteSpace(anchor, id) {
@@ -992,6 +1273,10 @@ class ModulopApp {
   async importFile(file, { anchor, fromDrop = false } = {}) {
     try {
       if (!isPortableFile(file)) throw new Error();
+      if (isFragmentFile(file)) {
+        await this.importFragment(file, { anchor, fromDrop });
+        return;
+      }
       const confirmed = await confirmAt(anchor || null, {
         title: "Importer ce fichier ?",
         message: `${file.name} sera ajouté comme espace local et deviendra l’espace actif.`,
@@ -1000,6 +1285,7 @@ class ModulopApp {
       if (!confirmed) return;
       const profile = await importProfile(file);
       if (profile.schemaVersion !== 1 || !Array.isArray(profile.modules)) throw new Error();
+      normalizeProfile(profile);
       const existing = profile.id ? await db.profiles.get(profile.id) : null;
       if (!profile.id || existing) profile.id = crypto.randomUUID();
       profile.updatedAt = new Date().toISOString();
@@ -1015,6 +1301,26 @@ class ModulopApp {
     } catch {
       this.announce("Fichier MODULOP invalide");
     }
+  }
+
+  async exportFragment(anchor, id) {
+    const module = this.store.profile.modules.find((item) => item.id === id);
+    if (!module) return;
+    this.menuFor = null;
+    this.syncOverflowMenus();
+    this.announce(await exportFragmentPackage(module));
+    anchor?.focus?.();
+  }
+
+  async importFragment(file, { anchor, fromDrop = false } = {}) {
+    const confirmed = await confirmAt(anchor || null, {
+      title: "Importer ce fragment ?",
+      message: `${file.name} sera ajouté à l’espace actuel sans remplacer vos autres fragments.`,
+      confirmLabel: "Importer"
+    });
+    if (!confirmed) return;
+    const module = await importFragmentPackage(file);
+    await this.insertModule(module, fromDrop ? "Fragment importé depuis le dépôt" : "Fragment importé");
   }
 
   exportPdf() {
@@ -1116,6 +1422,36 @@ function searchSelect(path, label, options, value) {
     </button>`).join("")}</div></section>`;
 }
 
+function renderSpaceCard(space, { compact = false, current = false } = {}) {
+  const modules = Array.isArray(space.modules) ? space.modules : [];
+  const name = space.identity?.name || "Espace MODULOP";
+  const count = space.moduleCount ?? modules.length;
+  const icons = modules.slice(0, compact ? 5 : 8).map((module) => {
+    const definition = moduleCatalog.find((item) => item.type === module.type);
+    return `<span title="${escapeAttribute(module.title || definition?.label || "Fragment")}">${icon(definition?.icon || "PanelTop", compact ? 13 : 15)}</span>`;
+  }).join("");
+  const overflow = modules.length > (compact ? 5 : 8) ? `<em>+${modules.length - (compact ? 5 : 8)}</em>` : "";
+  const template = space.template || "custom";
+  const updated = space.updatedAt ? new Date(space.updatedAt).toLocaleDateString("fr-FR") : "Aujourd’hui";
+  return `<article class="space-card ${compact ? "space-card--compact" : ""} ${current ? "is-current" : ""}" data-space-id="${space.id}">
+    <button type="button" class="space-card__main" data-action="open-space" data-profile-id="${space.id}">
+      <span class="space-card__avatar">${visualPreview(space.identity?.avatar)}</span>
+      <span class="space-card__copy">
+        <strong>${escapeHtml(name)}</strong>
+        <small>${escapeHtml(template)} · ${count} fragment${count > 1 ? "s" : ""} · ${updated}</small>
+      </span>
+      <span class="space-card__meter" aria-hidden="true"><i style="width:${Math.min(100, Math.max(6, count * 9))}%"></i></span>
+      <span class="space-card__fragments" aria-label="Fragments">${icons || `<span>${icon("PanelTop", 14)}</span>`}${overflow}</span>
+    </button>
+    <div class="space-card__actions" aria-label="Actions rapides pour ${escapeAttribute(name)}">
+      <button type="button" data-action="rename-space" data-profile-id="${space.id}" data-tooltip="Renommer">${icon("Pencil", 15)}</button>
+      <button type="button" data-action="export-space-zip" data-profile-id="${space.id}" data-tooltip="Exporter ZIP">${icon("FileArchive", 15)}</button>
+      <button type="button" data-action="export-space-json" data-profile-id="${space.id}" data-tooltip="Exporter JSON">${icon("FileJson", 15)}</button>
+      <button type="button" data-action="delete-space" data-profile-id="${space.id}" data-tooltip="Supprimer" aria-label="Supprimer cet espace">${icon("Trash2", 15)}</button>
+    </div>
+  </article>`;
+}
+
 function seededFrom(...parts) {
   let value = parts.join(":").split("").reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) >>> 0, 2166136261);
   return () => ((value = Math.imul(value ^ value >>> 15, 1 | value) + 0x6D2B79F5 | 0) >>> 0) / 4294967296;
@@ -1134,12 +1470,38 @@ function createInsertionControls(module) {
   return controls;
 }
 
+function moduleQuickActions(module, count = 1) {
+  const actions = isAssessmentModule(module)
+    ? [
+        { icon: "ListChecks", label: `Passer ${module.title}`, action: "take-assessment" },
+        { icon: "FilePenLine", label: `Modifier le contenu de ${module.title}`, action: "edit-module" },
+        { icon: "Palette", label: `Personnaliser le rendu de ${module.title}`, action: "customize-module" }
+      ]
+    : [
+        { icon: "FilePenLine", label: `Modifier le contenu de ${module.title}`, action: "edit-module" },
+        { icon: "Palette", label: `Personnaliser le rendu de ${module.title}`, action: "customize-module" },
+        { icon: "Copy", label: `Copier ${module.title} comme image`, action: "copy-module" }
+      ];
+  return actions.slice(0, Math.max(1, Math.min(3, Number(count) || 1)));
+}
+
 function duplicateModule(source, layout) {
   const copy = structuredClone(source);
   copy.id = crypto.randomUUID();
   copy.title = `${source.title} — copie`;
   copy.layout = { ...layout, x: undefined, y: undefined };
   return copy;
+}
+
+function setModuleProgress(element, value) {
+  const progress = Math.max(0, Math.min(100, Math.round(value)));
+  element.dataset.loadProgress = String(progress);
+  element.style.setProperty("--load-progress", String(progress));
+  element.style.setProperty("--load-ratio", String(progress / 100));
+}
+
+function nextFrame() {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
 }
 
 function insertionLabel(direction) {
@@ -1175,7 +1537,11 @@ function isInDirection(anchor, candidate, direction) {
 }
 
 function isPortableFile(file) {
-  return Boolean(file?.name && /\.(json|zip|modulop\.zip)$/i.test(file.name));
+  return Boolean(file?.name && /\.(json|zip|modulop\.zip|modulop-fragment\.zip)$/i.test(file.name));
+}
+
+function isFragmentFile(file) {
+  return Boolean(file?.name && /\.(modulop-fragment\.zip)$/i.test(file.name));
 }
 
 function fileBadge(label) {
@@ -1189,7 +1555,10 @@ function selectValue(options, value) {
 function setNested(target, path, value) {
   const parts = path.split(".");
   const key = parts.pop();
-  const owner = parts.reduce((current, part) => current[part], target);
+  const owner = parts.reduce((current, part) => {
+    current[part] ||= {};
+    return current[part];
+  }, target);
   owner[key] = value;
 }
 

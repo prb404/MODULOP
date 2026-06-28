@@ -20,6 +20,7 @@ pnpm-debug.log*
 /captures/
 /screenshots/
 /exports/
+/mockups/qa/
 /*.png
 /*.jpg
 /*.jpeg

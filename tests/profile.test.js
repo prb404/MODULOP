@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { createDefaultProfile, createModule, generateProfileName, SCHEMA_VERSION } from "../src/core/profile.js";
+import { createDefaultProfile, createModule, createProfileFromTemplate, generateProfileName, SCHEMA_VERSION } from "../src/core/profile.js";
 
 describe("profil V3", () => {
   it("crée uniquement le nouveau schéma", () => {
     const profile = createDefaultProfile();
     expect(profile.schemaVersion).toBe(SCHEMA_VERSION);
-    expect(profile.modules).toHaveLength(13);
+    expect(profile.modules).toHaveLength(14);
     expect(profile.identity.name).toBeTruthy();
     expect(profile.identity.avatar.kind).toBe("initials");
     expect(profile.modules[0].type).toBe("rich-text");
@@ -31,5 +31,12 @@ describe("profil V3", () => {
     first.data.items[0].label = "Modifié";
     expect(second.data.items[0].label).toBe("Nouvel objet");
     expect(first.id).not.toBe(second.id);
+  });
+
+  it("crée un espace vierge sans fragment d’amorçage", () => {
+    const profile = createProfileFromTemplate("blank");
+    expect(profile.template).toBe("blank");
+    expect(profile.modules).toHaveLength(0);
+    expect(profile.uiPreferences.moduleActions.visibleShortcuts).toBe(1);
   });
 });

@@ -17,8 +17,10 @@ entièrement statique et ne dépend d'aucun CDN.
 ## Fonctionnalités actuelles
 
 - canevas unique sans distinction entre consultation et édition ;
-- introduction gérée comme un fragment normal ;
-- sept modules préchargés et une bibliothèque catégorisée ;
+- espaces locaux nommables, exportables et supprimables depuis l’accueil ;
+- espace vierge réel avec onboarding de dépôt, collage, import et intention ;
+- fragments créés depuis texte, URL, image locale, JSON/ZIP MODULOP ou fragment autonome ;
+- bibliothèque catégorisée ;
 - grille responsive ;
 - réorganisation par glisser-déposer ;
 - redimensionnement direct par poignées, y compris au clavier ;
@@ -31,7 +33,8 @@ entièrement statique et ne dépend d'aucun CDN.
 - trois atmosphères visuelles ;
 - pseudonyme anonyme généré en trois parties ;
 - sauvegarde automatique dans IndexedDB ;
-- import/export JSON et `.modulop.zip` autonome ;
+- import/export JSON, `.modulop.zip` autonome et `.modulop-fragment.zip` ;
+- skeleton de chargement avec progression explicite par fragment ;
 - menu global réduit à une pastille ;
 - panneaux ancrables sur quatre côtés ou flottants et redimensionnables ;
 - questionnaire Gardner de 72 items avec feedback et trois rendus ECharts ;
@@ -65,4 +68,33 @@ premier contrat déclaratif pour le questionnaire, le layout et ses renderers.
 
 ```powershell
 npm run check
+npm run qa:browser
+```
+
+`qa:browser` lance Vite sur un port de test, pilote Microsoft Edge via
+`playwright-core`, vérifie les parcours accueil → espace vierge → création de
+fragment → panneau → retour accueil, puis écrit les captures dans `mockups/qa/`.
+
+Si Edge n’est pas installé à l’emplacement Windows par défaut, définir :
+
+```powershell
+$env:MODULOP_BROWSER="C:\chemin\vers\msedge.exe"
+npm run qa:browser
+```
+
+## Versioning
+
+`package.json` porte le semver propre (`4.0.0`, `4.1.0`, etc.). L’app affiche une
+version enrichie avec timestamp dans `src/core/version.js`.
+
+```powershell
+npm run release:patch
+npm run release:minor
+npm run release:major
+```
+
+Pour une itération sans changer de semver :
+
+```powershell
+npm run version:stamp
 ```

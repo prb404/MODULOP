@@ -1,5 +1,5 @@
 import Dexie from "dexie";
-import { createDefaultProfile, createProfileFromTemplate } from "./profile.js";
+import { createModule, createProfileFromTemplate, moduleCatalog } from "./profile.js";
 import { remoteResources } from "./remote-resources.js";
 
 export const db = new Dexie("modulop-v36");
@@ -23,9 +23,11 @@ export class ProfileStore extends EventTarget {
     const activeId = await db.preferences.get("activeProfileId");
     this.profile = activeId?.value ? await db.profiles.get(activeId.value) : await db.profiles.orderBy("updatedAt").last();
     if (!this.profile || this.profile.schemaVersion !== 1) {
-      this.profile = createDefaultProfile();
+      this.profile = createProfileFromTemplate("blank");
       await db.profiles.put(this.profile);
       await db.preferences.put({ key: "activeProfileId", value: this.profile.id });
+    } else if (normalizeProfile(this.profile)) {
+      await db.profiles.put(this.profile);
     }
     return this.profile;
   }
@@ -51,6 +53,7 @@ export class ProfileStore extends EventTarget {
 
   async createSpace(template = "blank") {
     this.profile = createProfileFromTemplate(template);
+    normalizeProfile(this.profile);
     await db.profiles.put(this.profile);
     await db.preferences.put({ key: "activeProfileId", value: this.profile.id });
     this.history = [];
@@ -63,6 +66,7 @@ export class ProfileStore extends EventTarget {
     const next = await db.profiles.get(id);
     if (!next) return null;
     this.profile = next;
+    if (normalizeProfile(this.profile)) await db.profiles.put(this.profile);
     await db.preferences.put({ key: "activeProfileId", value: id });
     this.history = [];
     this.future = [];
@@ -73,7 +77,8 @@ export class ProfileStore extends EventTarget {
   async deleteSpace(id) {
     await db.profiles.delete(id);
     if (this.profile?.id === id) {
-      this.profile = await db.profiles.orderBy("updatedAt").last() || createDefaultProfile();
+      this.profile = await db.profiles.orderBy("updatedAt").last() || createProfileFromTemplate("blank");
+      normalizeProfile(this.profile);
       await db.profiles.put(this.profile);
       await db.preferences.put({ key: "activeProfileId", value: this.profile.id });
       this.dispatchEvent(new CustomEvent("change", { detail: this.profile }));
@@ -106,6 +111,7 @@ export class ProfileStore extends EventTarget {
 
   async persist() {
     clearTimeout(this.saveTimer);
+    normalizeProfile(this.profile);
     await db.profiles.put(this.profile);
     await db.preferences.put({ key: "activeProfileId", value: this.profile.id });
     this.status = "saved";
@@ -134,7 +140,7 @@ export class ProfileStore extends EventTarget {
     await db.transaction("rw", db.profiles, db.assets, db.preferences, async () => {
       await db.profiles.clear();
       await db.assets.clear();
-      this.profile = createDefaultProfile();
+      this.profile = createProfileFromTemplate("blank");
       await db.profiles.put(this.profile);
       await db.preferences.put({ key: "activeProfileId", value: this.profile.id });
     });
@@ -148,7 +154,7 @@ export class ProfileStore extends EventTarget {
       await db.profiles.clear();
       await db.assets.clear();
       await db.preferences.clear();
-      this.profile = createDefaultProfile();
+      this.profile = createProfileFromTemplate("blank");
       await db.profiles.put(this.profile);
       await db.preferences.put({ key: "activeProfileId", value: this.profile.id });
     });
@@ -187,4 +193,56 @@ export async function resolveAsset(reference) {
   if (!reference?.startsWith("asset://")) return reference;
   const asset = await db.assets.get(reference.slice(8));
   return asset ? URL.createObjectURL(asset.blob) : "";
+}
+
+export function normalizeProfile(profile) {
+  if (!profile || profile.schemaVersion !== 1) return false;
+  const before = JSON.stringify({
+    template: profile.template,
+    uiPreferences: profile.uiPreferences,
+    moduleLayouts: profile.modules?.map((module) => [module.id, module.type, module.layout, module.presentation])
+  });
+  profile.template ||= "custom";
+  profile.uiPreferences ||= {};
+  profile.uiPreferences.moduleActions ||= {};
+  profile.uiPreferences.moduleActions.visibleShortcuts = clampNumber(profile.uiPreferences.moduleActions.visibleShortcuts, 1, 3, 1);
+  profile.uiPreferences.panels ||= {};
+  const defaults = createProfileFromTemplate("blank").uiPreferences.panels;
+  Object.entries(defaults).forEach(([key, value]) => {
+    profile.uiPreferences.panels[key] = { ...value, ...(profile.uiPreferences.panels[key] || {}) };
+  });
+  profile.modules = Array.isArray(profile.modules) ? profile.modules.filter(Boolean).map(normalizeModule) : [];
+  profile.updatedAt ||= new Date().toISOString();
+  const after = JSON.stringify({
+    template: profile.template,
+    uiPreferences: profile.uiPreferences,
+    moduleLayouts: profile.modules?.map((module) => [module.id, module.type, module.layout, module.presentation])
+  });
+  return before !== after;
+}
+
+function normalizeModule(module) {
+  const fallback = createModule(module.type || "rich-text");
+  const definition = moduleCatalog.find((item) => item.type === module.type) || moduleCatalog[0];
+  module.id ||= crypto.randomUUID();
+  module.type ||= fallback.type;
+  module.title ||= fallback.title;
+  module.variant ||= fallback.variant;
+  module.data ||= structuredClone(fallback.data);
+  module.presentation ||= structuredClone(fallback.presentation);
+  module.presentation.options ||= {};
+  module.layout ||= {};
+  module.layout.w = clampNumber(module.layout.w, 1, 12, definition.layout?.[0] || 4);
+  module.layout.h = clampNumber(module.layout.h, 1, 20, definition.layout?.[1] || 4);
+  module.layout.minW = clampNumber(module.layout.minW, 1, module.layout.w, Math.min(3, module.layout.w));
+  module.layout.minH = clampNumber(module.layout.minH, 1, module.layout.h, Math.min(2, module.layout.h));
+  if (module.layout.x !== undefined) module.layout.x = clampNumber(module.layout.x, 0, 12, 0);
+  if (module.layout.y !== undefined) module.layout.y = Math.max(0, Number(module.layout.y) || 0);
+  return module;
+}
+
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, number));
 }

@@ -53,8 +53,10 @@ export class GridStackManager {
   addWidget(element, layout) {
     if (!this.grid) throw new Error("La grille doit être initialisée avant l’ajout d’un widget.");
     applyAttributes(element, this.responsiveLayout(element, layout, true));
+    element.classList.add("is-grid-hydrating");
     this.element.append(element);
     this.grid.makeWidget(element);
+    requestAnimationFrame(() => element.classList.remove("is-grid-hydrating"));
   }
 
   removeWidget(element) {
@@ -79,15 +81,30 @@ export class GridStackManager {
     this.grid.update(element, this.responsiveLayout(element, layout));
   }
 
+  beginBatch() {
+    this.grid?.batchUpdate(true);
+    this.element.classList.add("is-hydrating-grid");
+    this.grid?.setAnimation?.(false);
+  }
+
+  endBatch() {
+    this.grid?.batchUpdate(false);
+    requestAnimationFrame(() => {
+      this.element.classList.remove("is-hydrating-grid");
+      this.grid?.setAnimation?.(true);
+    });
+  }
+
   responsiveLayout(element, layout, autoPosition = false) {
     const columns = this.grid?.getColumn() || 12;
     const type = element.dataset.moduleType;
     const mobileHeight = {
-      "rich-text": 7, "starter-pack": 8, constellation: 7, gardner: 7,
-      values: 6, manual: 5, timeline: 5, embed: 5
+      "rich-text": 8, "starter-pack": 8, constellation: 7, gardner: 8,
+      values: 7, manual: 6, timeline: 6, embed: 6, media: 6, "link-card": 5
     }[type];
     const minimumHeight = {
-      "rich-text": 4, values: 5, "starter-pack": 4, constellation: 5, gardner: 5
+      "rich-text": 5, values: 5, "starter-pack": 5, constellation: 5, gardner: 6,
+      manual: 5, timeline: 5, embed: 5, media: 5, "link-card": 4
     }[type] || layout.minH || 2;
     const normalized = {
       ...layout,

@@ -9,25 +9,26 @@ import { componentSources } from "./component-sources.js";
 export const SCHEMA_VERSION = 1;
 
 export const moduleCatalog = [
-  { type: "rich-text", label: "Texte riche", category: "Contenus", icon: "Type", layout: [12, 3] },
-  { type: "starter-pack", label: "Starter pack", category: "Collections", icon: "Shapes", layout: [8, 4] },
-  { type: "constellation", label: "Constellation", category: "Personnalisation", icon: "Orbit", layout: [4, 6] },
-  { type: "portrait-chinois", label: "Portrait chinois", category: "Quiz & portraits", icon: "CircleDot", layout: [4, 4] },
-  { type: "values", label: "Valeurs en tension", category: "Tests & questionnaires", icon: "SlidersHorizontal", layout: [4, 4] },
-  { type: "manual", label: "Mode d'emploi", category: "Personnalisation", icon: "NotebookTabs", layout: [8, 4] },
-  { type: "timeline", label: "Chronique", category: "Parcours", icon: "GitCommitHorizontal", layout: [8, 4] },
-  { type: "self-efficacy", label: "Efficacité personnelle", category: "Tests & questionnaires", icon: "Activity", layout: [4, 4] },
-  { type: "learner-efficacy", label: "Auto-efficacité apprenante", category: "Tests & questionnaires", icon: "GraduationCap", layout: [4, 4] },
-  { type: "collective-efficacy", label: "Efficacité collective", category: "Tests & questionnaires", icon: "UsersRound", layout: [4, 4] },
-  { type: "collective-intelligence", label: "Intelligences collectives", category: "Tests & questionnaires", icon: "Network", layout: [6, 4] },
-  { type: "sic-compact", label: "SICsIA court", category: "Tests & questionnaires", icon: "Waypoints", layout: [4, 4] },
-  { type: "sic-long", label: "SICsIA recherche", category: "Tests & questionnaires", icon: "Route", layout: [6, 5] },
-  { type: "tpack", label: "TPACK.xs", category: "Tests & questionnaires", icon: "MonitorCog", layout: [4, 4] },
-  { type: "personality", label: "Big Five IPIP", category: "Tests & questionnaires", icon: "Fingerprint", layout: [4, 4] },
-  { type: "gardner", label: "Mes huit terrains de jeu", category: "Tests & questionnaires", icon: "Radar", layout: [8, 5] },
-  { type: "cognitive", label: "Défis cognitifs", category: "Jeux & défis", icon: "BrainCircuit", layout: [4, 4] },
-  { type: "link-card", label: "Lien enrichi", category: "Web & médias", icon: "Link2", layout: [4, 3] },
-  { type: "embed", label: "Intégration", category: "Web & médias", icon: "PanelsTopLeft", layout: [6, 4] }
+  { type: "rich-text", label: "Texte riche", category: "Contenus", icon: "Type", layout: [12, 5] },
+  { type: "starter-pack", label: "Starter pack", category: "Collections", icon: "Shapes", layout: [8, 5] },
+  { type: "constellation", label: "Constellation", category: "Personnalisation", icon: "Orbit", layout: [5, 6] },
+  { type: "portrait-chinois", label: "Portrait chinois", category: "Quiz & portraits", icon: "CircleDot", layout: [4, 5] },
+  { type: "values", label: "Valeurs en tension", category: "Tests & questionnaires", icon: "SlidersHorizontal", layout: [5, 5] },
+  { type: "manual", label: "Mode d'emploi", category: "Personnalisation", icon: "NotebookTabs", layout: [8, 5] },
+  { type: "timeline", label: "Chronique", category: "Parcours", icon: "GitCommitHorizontal", layout: [8, 5] },
+  { type: "self-efficacy", label: "Efficacité personnelle", category: "Tests & questionnaires", icon: "Activity", layout: [4, 5] },
+  { type: "learner-efficacy", label: "Auto-efficacité apprenante", category: "Tests & questionnaires", icon: "GraduationCap", layout: [4, 5] },
+  { type: "collective-efficacy", label: "Efficacité collective", category: "Tests & questionnaires", icon: "UsersRound", layout: [4, 5] },
+  { type: "collective-intelligence", label: "Intelligences collectives", category: "Tests & questionnaires", icon: "Network", layout: [6, 5] },
+  { type: "sic-compact", label: "SICsIA court", category: "Tests & questionnaires", icon: "Waypoints", layout: [4, 5] },
+  { type: "sic-long", label: "SICsIA recherche", category: "Tests & questionnaires", icon: "Route", layout: [6, 6] },
+  { type: "tpack", label: "TPACK.xs", category: "Tests & questionnaires", icon: "MonitorCog", layout: [4, 5] },
+  { type: "personality", label: "Big Five IPIP", category: "Tests & questionnaires", icon: "Fingerprint", layout: [5, 5] },
+  { type: "gardner", label: "Mes huit terrains de jeu", category: "Tests & questionnaires", icon: "Radar", layout: [8, 6] },
+  { type: "cognitive", label: "Défis cognitifs", category: "Jeux & défis", icon: "BrainCircuit", layout: [4, 5] },
+  { type: "media", label: "Image / média", category: "Web & médias", icon: "Image", layout: [5, 5] },
+  { type: "link-card", label: "Lien enrichi", category: "Web & médias", icon: "Link2", layout: [5, 4] },
+  { type: "embed", label: "Intégration", category: "Web & médias", icon: "PanelsTopLeft", layout: [6, 5] }
 ];
 
 const profileParts = {
@@ -66,6 +67,7 @@ export function createDefaultProfile() {
     credits: componentSources.map(({ id, source, author, concept, license, status, implementation }) => ({ id, source, author, concept, license, status, implementation })),
     updatedAt: new Date().toISOString(),
     uiPreferences: {
+      moduleActions: { visibleShortcuts: 1 },
       panels: {
         menu: { mode: "dock", edge: "right", size: 390 },
         library: { mode: "dock", edge: "right", size: 520 },
@@ -150,12 +152,17 @@ export function createDefaultProfile() {
         data: createAssessmentFromPreset("sic22-full")
       },
       {
-        id: crypto.randomUUID(), type: "link-card", title: "Lien enrichi", variant: "editorial", layout: gridLayout(0, 24, 4, 3, 3, 2),
+        id: crypto.randomUUID(), type: "media", title: "Image locale", variant: "poster", layout: gridLayout(0, 24, 5, 4, 3, 3),
+        presentation: presentation("media-local"),
+        data: structuredClone(templates.media)
+      },
+      {
+        id: crypto.randomUUID(), type: "link-card", title: "Lien enrichi", variant: "editorial", layout: gridLayout(5, 24, 4, 3, 3, 2),
         presentation: presentation("link-card"),
         data: structuredClone(templates["link-card"])
       },
       {
-        id: crypto.randomUUID(), type: "embed", title: "Intégration", variant: "responsive", layout: gridLayout(4, 24, 6, 4, 4, 3),
+        id: crypto.randomUUID(), type: "embed", title: "Intégration", variant: "responsive", layout: gridLayout(0, 28, 6, 4, 4, 3),
         presentation: presentation("embed-safe"),
         data: structuredClone(templates.embed)
       }
@@ -171,7 +178,7 @@ export function createProfileFromTemplate(template = "blank") {
     tests: ["rich-text", "self-efficacy", "collective-efficacy", "collective-intelligence", "sic-compact", "sic-long", "tpack", "personality", "gardner"],
     portfolio: ["rich-text", "starter-pack", "timeline", "portrait-chinois", "link-card", "manual"],
     "research-sicsia": ["rich-text", "collective-intelligence", "sic-compact", "sic-long", "collective-efficacy", "timeline"],
-    media: ["rich-text", "link-card", "embed", "starter-pack", "constellation"]
+    media: ["rich-text", "media", "link-card", "embed", "starter-pack", "constellation"]
   };
   const keep = new Set(sets[template] || sets.blank);
   profile.id = crypto.randomUUID();
@@ -182,8 +189,7 @@ export function createProfileFromTemplate(template = "blank") {
     layout: { ...module.layout, x: index % 2 ? 6 : 0, y: Math.floor(index / 2) * 5 }
   }));
   if (template === "blank") {
-    profile.modules[0].title = "Nouveau profil";
-    profile.modules[0].data = { eyebrow: "Nouveau départ", markdown: "# Commencez par écrire une première intention.", scale: "hero" };
+    profile.modules = [];
   }
   profile.updatedAt = new Date().toISOString();
   return profile;
@@ -210,6 +216,7 @@ const templates = {
   personality: createAssessmentFromPreset("ipip-big-five-50"),
   gardner: createGardnerData(),
   cognitive: createAssessmentFromPreset("sic-compact"),
+  media: { src: "", title: "Image locale", caption: "Ajoutez ou collez une image.", alt: "Image locale", kind: "image" },
   "link-card": { url: "https://example.org", title: "Une ressource à relier au profil", description: "Ajoutez une URL et complétez son aperçu local.", image: "", provider: "web" },
   embed: { input: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", src: "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ", provider: "youtube", title: "Vidéo intégrée", ratio: "16/9" }
 };

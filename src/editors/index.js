@@ -1,4 +1,5 @@
 import DOMPurify from "dompurify";
+import { marked } from "marked";
 import { icon } from "../ui/icons.js";
 import { gardnerDimensions, gardnerQuestions, scoreGardner } from "../gardner.js";
 import { saveAsset } from "../core/store.js";
@@ -48,6 +49,7 @@ export async function mountEditor({ module, root, patch, announce }) {
   if (module.type === "starter-pack") await mountStarter(module, root, patch, announce);
   if (module.type === "gardner") mountGardner(module, root, patch);
   if (["portrait-chinois", "manual", "timeline", "values"].includes(module.type)) mountListEditor(module, root, patch);
+  if (module.type === "media") mountMedia(root, patch, announce);
   if (assessmentTypes.includes(module.type)) mountAssessmentEditor(module, root, patch);
   ControlRegistry.bind(root, (name, value, input) => {
     if (name.startsWith("pair:")) {
@@ -213,7 +215,17 @@ function genericEditor(module) {
     <label class="field"><span>URL HTTPS</span><input type="url" data-path="data.url" value="${escapeAttribute(module.data.url)}"></label>
     <label class="field"><span>Titre affiché</span><input data-path="data.title" value="${escapeAttribute(module.data.title)}"></label>
     <label class="field"><span>Description</span><textarea data-path="data.description">${escapeHtml(module.data.description)}</textarea></label>
-    ${visualPickerField(module.data.visual, "data.visual", "Aperçu")}
+    ${visualPickerField(module.data.visual, "data.visual", "Aperçu", { allowedKinds: ["remote", "asset", "icon", "emoji"] })}
+  </section>`;
+  if (module.type === "media") return `<div class="save-state" data-save-state><i></i><span>Enregistré localement</span></div><section class="editor-section">
+    <label class="field"><span>Titre du fragment</span><input data-path="title" value="${escapeAttribute(module.title)}"></label>
+    <label class="field"><span>Titre affiché</span><input data-path="data.title" value="${escapeAttribute(module.data.title || "")}"></label>
+    <label class="field"><span>Texte alternatif</span><input data-path="data.alt" value="${escapeAttribute(module.data.alt || "")}"></label>
+    <label class="field"><span>Légende</span><textarea data-path="data.caption">${escapeHtml(module.data.caption || "")}</textarea></label>
+    <div class="segmented">
+      ${["poster", "full", "caption"].map((value) => `<button type="button" data-choice-path="variant" data-value="${value}" class="${module.variant === value ? "is-active" : ""}">${{ poster: "Poster", full: "Plein cadre", caption: "Légendé" }[value]}</button>`).join("")}
+    </div>
+    <label class="drop-field">${icon("ImagePlus", 18)} Remplacer l’image<input type="file" accept="image/*" data-media-replace></label>
   </section>`;
   if (module.type === "embed") {
     const resolved = resolveEmbed(module.data.input || module.data.src);
@@ -256,7 +268,6 @@ async function mountMarkdown(module, root, patch, announce) {
     import("@toast-ui/editor/dist/toastui-editor.css")
   ]);
   await import("@toast-ui/editor/dist/i18n/fr-fr");
-  const { marked } = await import("marked");
   const syncMarkdown = (value) => {
     const preview = root.querySelector("[data-markdown-preview]");
     if (preview) preview.innerHTML = DOMPurify.sanitize(marked.parse(value || ""));
@@ -467,6 +478,22 @@ async function mountStarter(module, root, patch, announce) {
     } catch {
       announce("Aucune image accessible dans le presse-papier");
     }
+  });
+}
+
+function mountMedia(root, patch, announce) {
+  root.querySelector("[data-media-replace]")?.addEventListener("change", async (event) => {
+    const [file] = event.target.files || [];
+    if (!file) return;
+    const reference = await saveAsset(file, file.name);
+    patch((draft) => {
+      draft.data.src = reference;
+      draft.data.kind = file.type.startsWith("image/") ? "image" : "file";
+      draft.data.title ||= file.name;
+      draft.data.alt ||= file.name;
+      draft.data.caption ||= file.type || "Média local";
+    }, true);
+    announce?.("Média remplacé localement");
   });
 }
 
