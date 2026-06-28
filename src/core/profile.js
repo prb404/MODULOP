@@ -82,11 +82,15 @@ export function createDefaultProfile() {
     uiPreferences: {
       moduleActions: { visibleShortcuts: 1 },
       commandToolbar: {
+        mode: "dock",
         edge: "left",
         x: 18,
         y: 120,
-        size: 48,
-        expanded: false,
+        width: 56,
+        height: 440,
+        columns: 1,
+        rows: 9,
+        preferredAxis: "height",
         order: ["spaces", "fragments", "presence", "import", "appearance", "settings", "help"]
       },
       panels: {

@@ -20,6 +20,8 @@ describe("profil V3", () => {
     expect(profile.credits).toHaveLength(8);
     expect(profile.uiPreferences.panels.about.edge).toBe("bottom");
     expect(profile.uiPreferences.commandToolbar.edge).toBe("left");
+    expect(profile.uiPreferences.commandToolbar.width).toBe(56);
+    expect(profile.uiPreferences.commandToolbar.height).toBeGreaterThan(300);
     expect(profile.uiPreferences.commandToolbar.order).toContain("presence");
   });
 

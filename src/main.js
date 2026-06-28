@@ -24,6 +24,7 @@ import { creditsMarkdown } from "./core/component-sources.js";
 import { initialsAvatar } from "./core/visuals.js";
 import { appVersion } from "./core/version.js";
 import { RealtimeController, realtimePanelBody } from "./realtime/controller.js";
+import { systemAppCatalog } from "./system/apps.js";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 
@@ -38,7 +39,10 @@ class ModulopApp {
     this.panel = null;
     this.selectedId = null;
     this.menuFor = null;
-    this.toastTimer = null;
+    this.notifications = [];
+    this.notificationTimers = new Map();
+    this.notifiedOfferIds = new Set();
+    this.notifiedReceivedIds = new Set();
     this.renderedModules = new Map();
     this.panelManager = null;
     this.commandToolbar = null;
@@ -61,6 +65,7 @@ class ModulopApp {
     const params = new URLSearchParams(location.search);
     this.homeVisible = params.has("home") || (!params.has("template") && !params.has("profile"));
     this.consentFilter = "active";
+    this.libraryKind = "fragments";
     this.lastScrollY = 0;
     this.resizeTimer = null;
     this.dragDepth = 0;
@@ -69,6 +74,7 @@ class ModulopApp {
     this.store.addEventListener("change", () => this.realtime.syncProfile());
     this.realtime.addEventListener("change", (event) => {
       this.realtimeState = event.detail;
+      this.enqueueRealtimeNotifications(event.detail);
       this.renderRealtimeSurfaces();
       if (this.panel === "live") this.renderPanel();
     });
@@ -80,7 +86,6 @@ class ModulopApp {
       <div class="command-toolbar-host" data-command-toolbar></div>
       <main class="workspace">
         <section class="welcome-screen" data-home hidden></section>
-        <section class="workspace-presence-strip" data-presence-strip hidden></section>
         <section class="blank-workspace" data-blank-workspace hidden></section>
         <section class="module-grid" id="module-grid"></section>
         <button class="workspace-add-fragment" type="button" data-action="open-library" data-workspace-add hidden>${icon("Plus", 18)}<span>Ajouter un fragment</span></button>
@@ -92,7 +97,7 @@ class ModulopApp {
       </nav>
       <div id="panel-host"></div>
       <div id="global-tooltip" class="tooltip" role="tooltip" hidden></div>
-      <div class="toast" role="status" aria-live="polite"></div>
+      <div class="notification-stack" data-notifications role="status" aria-live="polite"></div>
       <div class="drop-overlay" data-drop-overlay hidden><div>${icon("FileArchive", 34)}<strong>Déposez un contenu</strong><span>Image, texte, URL, .json, .zip, .modulop.zip ou fragment autonome</span></div></div>
       <div class="sr-only" data-grid-announcer aria-live="assertive"></div>
       <input id="import-input" type="file" accept=".json,.zip,.modulop.zip,.modulop-fragment.zip,application/json,application/zip" hidden>`;
@@ -597,7 +602,12 @@ class ModulopApp {
     if (action === "export-zip") this.announce(await exportZipProfile(this.store.profile));
     if (action === "export-pdf") this.exportPdf();
     if (action === "import") this.root.querySelector("#import-input").click();
-    if (action === "live-join") await this.realtime.connect(this.root.querySelector("[data-live-room]")?.value);
+    if (action === "library-filter") {
+      this.libraryKind = button.dataset.libraryKind || "fragments";
+      this.renderPanel();
+    }
+    if (action === "open-system-app") this.openSystemApp(button.dataset.appId);
+    if (action === "dismiss-notification") this.dismissNotification(button.dataset.notificationId);
     if (action === "live-private-room") {
       if (isPersonalSpace(this.store.profile)) {
         this.openPanel("live");
@@ -610,10 +620,22 @@ class ModulopApp {
     if (action === "live-copy-invite" && !isPersonalSpace(this.store.profile)) await this.realtime.copyInviteLink();
     if (action === "live-ping" && !isPersonalSpace(this.store.profile)) await this.realtime.sendPing(`Ping ${new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}`);
     if (action === "live-offer-fragment") await this.realtime.offerModule(this.store.profile.modules.find((item) => item.id === id));
-    if (action === "live-accept-offer") await this.realtime.acceptOffer(button.dataset.offerId);
-    if (action === "live-decline-offer") await this.realtime.declineOffer(button.dataset.offerId);
-    if (action === "live-import-received") await this.realtime.importReceived(button.dataset.offerId);
-    if (action === "live-discard-received") this.realtime.discardReceived(button.dataset.offerId);
+    if (action === "live-accept-offer") {
+      await this.realtime.acceptOffer(button.dataset.offerId);
+      this.dismissNotification(button.dataset.notificationId);
+    }
+    if (action === "live-decline-offer") {
+      await this.realtime.declineOffer(button.dataset.offerId);
+      this.dismissNotification(button.dataset.notificationId);
+    }
+    if (action === "live-import-received") {
+      await this.realtime.importReceived(button.dataset.offerId);
+      this.dismissNotification(button.dataset.notificationId);
+    }
+    if (action === "live-discard-received") {
+      this.realtime.discardReceived(button.dataset.offerId);
+      this.dismissNotification(button.dataset.notificationId);
+    }
     if (action === "live-block-peer") this.realtime.blockPeer(button.dataset.peerId);
     if (action === "live-unblock-peer") this.realtime.unblockPeer(button.dataset.peerId);
     if (action === "live-focus-peer" || action === "live-focus-trace" || action === "live-focus-message") {
@@ -746,6 +768,16 @@ class ModulopApp {
     this.renderPanel();
   }
 
+  openSystemApp(appId) {
+    const map = { presence: "live", library: "library", notifications: "live" };
+    const panel = map[appId];
+    if (!panel) {
+      this.announce("App système indisponible");
+      return;
+    }
+    this.openPanel(panel);
+  }
+
   closePanel() {
     destroyEditor();
     this.panel = null;
@@ -826,7 +858,6 @@ class ModulopApp {
   }
 
   renderRealtimeSurfaces() {
-    this.renderPresenceStrip();
     this.renderCommandToolbar();
     const selfId = this.realtimeState?.identity?.peerId;
     const byModule = new Map();
@@ -869,35 +900,6 @@ class ModulopApp {
       record.element.dataset.traceCount = String(relation.traceCount);
       relationMarker.innerHTML = relation.items.map((item) => `<span class="${item.tone}">${icon(item.icon, 12)}${escapeHtml(item.label)}</span>`).join("");
     }
-  }
-
-  renderPresenceStrip() {
-    const strip = this.root.querySelector("[data-presence-strip]");
-    if (!strip) return;
-    const modules = this.store.profile.modules || [];
-    const personal = isPersonalSpace(this.store.profile);
-    strip.hidden = this.homeVisible || !modules.length;
-    if (strip.hidden) return;
-    const online = this.realtimeState?.status === "p2p";
-    const peers = this.realtimeState?.presence || [];
-    const remotePeers = peers.filter((peer) => peer.peerId !== this.realtimeState?.identity?.peerId);
-    const comments = this.realtimeState?.comments?.length || 0;
-    const reactions = this.realtimeState?.reactions?.length || 0;
-    const offers = (this.realtimeState?.offers?.length || 0) + (this.realtimeState?.receivedFragments?.length || 0);
-    strip.innerHTML = `
-      <button class="presence-strip__status" type="button" data-action="open-live">
-        <span class="live-dot ${online ? "is-online" : ""}"></span>
-        <strong>${online ? "Présences actives" : "Présences en veille"}</strong>
-        <small>${personal ? "partage fragmentaire" : online ? `${Math.max(1, peers.length)} présent${peers.length > 1 ? "s" : ""}` : "espace privé"}</small>
-      </button>
-      <button class="presence-strip__avatars" type="button" data-action="open-live" aria-label="Voir les présences">
-        ${(remotePeers.length ? remotePeers : peers).slice(0, 5).map((peer) => `<span title="${escapeAttribute(peer.displayName || peer.nickname || "Présence")}">${visualPreview(peer.avatar)}</span>`).join("") || `<span>${icon("UserRound", 14)}</span>`}
-      </button>
-      <button class="presence-strip__metric" type="button" data-action="open-live">${icon("MessageCircle", 14)}<span>${comments} trace${comments > 1 ? "s" : ""}</span></button>
-      <button class="presence-strip__metric" type="button" data-action="open-live">${icon("Smile", 14)}<span>${reactions}</span></button>
-      <button class="presence-strip__metric" type="button" data-action="open-live">${icon("PackageOpen", 14)}<span>${offers}</span></button>
-      ${personal ? `<button class="presence-strip__invite" type="button" data-action="open-live">${icon("PackageOpen", 14)}<span>Fragments</span></button>`
-        : `<button class="presence-strip__invite" type="button" data-action="live-private-room">${icon("Link", 14)}<span>Lien privé</span></button>`}`;
   }
 
   bindRealtimePanel() {
@@ -996,28 +998,36 @@ class ModulopApp {
   libraryBody() {
     const categories = [...new Set(moduleCatalog.map((item) => item.category))];
     const neighbors = this.insertionNeighbors();
-    const featured = moduleCatalog.find((item) => item.type === "gardner") || moduleCatalog[0];
+    const apps = systemAppCatalog();
+    const isApps = this.libraryKind === "apps";
+    const featured = isApps ? apps.find((item) => item.id === "presence") || apps[0] : moduleCatalog.find((item) => item.type === "gardner") || moduleCatalog[0];
     const context = this.pendingInsertion
       ? `<div class="insertion-context">${icon(directionIcon(this.pendingInsertion.direction), 17)}<span>Insertion ${insertionLabel(this.pendingInsertion.direction)}</span></div>`
       : "";
-    return `<section class="library-studio">
-      <header class="library-hero">
+    return `<section class="library-studio library-studio--compact" data-library-kind="${isApps ? "apps" : "fragments"}">
+      <header class="library-header">
         <div>
-          <span class="eyebrow">Fragments locaux</span>
-          <h3>Bibliothèque de fragments</h3>
-          <p>Composer l’espace avec des modules installés localement. Chaque ajout devient un fragment autonome, partageable ensuite si vous le choisissez.</p>
+          <span class="eyebrow">Catalogue</span>
+          <h3>${isApps ? "Apps système" : "Fragments"}</h3>
+          <p>${isApps ? "Outils modulaires de l’interface, ouvrables en panneau et préparés pour devenir fragments d’espace." : "Modules installés localement, ajoutables à la grille et partageables ensuite de manière explicite."}</p>
         </div>
-        <span class="library-availability"><i></i>Disponible hors ligne</span>
+        <span class="library-availability"><i></i>Hors ligne</span>
       </header>
-      <label class="field catalog-search"><span>Rechercher</span><input type="search" placeholder="Texte, constellation, questionnaire…" oninput="this.closest('.panel__body').querySelectorAll('.catalog-card,.neighbor-card').forEach(card=>card.hidden=!card.dataset.search.includes(this.value.toLowerCase()))"></label>
-      <nav class="catalog-filters" aria-label="Catégories de fragments">
+      <div class="library-controls">
+        <nav class="segmented-control" aria-label="Type de catalogue">
+          <button type="button" data-action="library-filter" data-library-kind="fragments" class="${!isApps ? "is-active" : ""}" aria-pressed="${!isApps}">${icon("PackageOpen", 15)} Fragments</button>
+          <button type="button" data-action="library-filter" data-library-kind="apps" class="${isApps ? "is-active" : ""}" aria-pressed="${isApps}">${icon("Radar", 15)} Apps</button>
+        </nav>
+        <label class="field catalog-search"><span>Rechercher</span><input type="search" placeholder="${isApps ? "Présences, notifications…" : "Texte, constellation, questionnaire…"}" oninput="this.closest('.panel__body').querySelectorAll('.catalog-card,.neighbor-card,.system-app-card').forEach(card=>card.hidden=!card.dataset.search.includes(this.value.toLowerCase()))"></label>
+      </div>
+      ${!isApps ? `<nav class="catalog-filters" aria-label="Catégories de fragments">
         <button type="button" class="is-active" onclick="this.closest('.panel__body').querySelector('.catalog-search input').value='';this.closest('.panel__body').querySelectorAll('.catalog-card,.neighbor-card').forEach(card=>card.hidden=false)">Tous</button>
         ${categories.map((category) => `<button type="button" onclick="const root=this.closest('.panel__body');root.querySelectorAll('.catalog-card').forEach(card=>card.hidden=card.dataset.category!==this.dataset.category);root.querySelectorAll('.neighbor-card').forEach(card=>card.hidden=true)" data-category="${escapeAttribute(category)}">${escapeHtml(categoryLabel(category))}</button>`).join("")}
-      </nav>
+      </nav>` : ""}
       ${context}
       <div class="library-layout">
         <div class="library-catalog">
-          ${neighbors.length ? `<section class="catalog-section neighbor-section"><h3>Dupliquer rapidement</h3><p>Reprendre le contenu et les dimensions d’un fragment voisin.</p><div class="neighbor-catalog">${neighbors.map((module) => {
+          ${!isApps && neighbors.length ? `<section class="catalog-section neighbor-section"><h3>Dupliquer rapidement</h3><p>Reprendre le contenu et les dimensions d’un fragment voisin.</p><div class="neighbor-catalog">${neighbors.map((module) => {
         const definition = moduleCatalog.find((item) => item.type === module.type);
         const layout = this.effectiveLayout(module);
         return `<button class="neighbor-card" type="button" data-action="duplicate-neighbor" data-source-id="${module.id}" data-search="${`${module.title} ${definition?.label || ""}`.toLowerCase()}">
@@ -1025,7 +1035,16 @@ class ModulopApp {
           <small>${layout.w} × ${layout.h}</small>${icon("CopyPlus", 15)}
         </button>`;
       }).join("")}</div></section>` : ""}
-          ${categories.map((category) => `<section class="catalog-section"><h3>${category}</h3><div class="catalog">${moduleCatalog.filter((item) => item.category === category).map((item) => `
+          ${isApps ? `<section class="catalog-section"><h3>Apps système</h3><div class="system-app-grid">${apps.map((app) => `
+            <button class="system-app-card" type="button" data-action="open-system-app" data-app-id="${app.id}" data-search="${`${app.label} ${app.category} ${app.description}`.toLowerCase()}">
+              <span class="catalog-card__icon">${icon(app.icon, 20)}</span>
+              <strong>${escapeHtml(app.label)}</strong>
+              <small>${escapeHtml(app.description)}</small>
+              <em>${escapeHtml(app.category)}</em>
+              <b>${app.renderModes.join(" / ")}</b>
+              ${icon("ArrowRight", 15)}
+            </button>`).join("")}</div></section>`
+            : categories.map((category) => `<section class="catalog-section"><h3>${category}</h3><div class="catalog">${moduleCatalog.filter((item) => item.category === category).map((item) => `
             <button class="catalog-card" type="button" data-action="add-module" data-type="${item.type}" data-category="${escapeAttribute(category)}" data-search="${`${item.label} ${category} ${moduleLibraryDescription(item)}`.toLowerCase()}">
               <span class="catalog-card__icon">${icon(item.icon, 20)}</span>
               <strong>${item.label}</strong>
@@ -1036,16 +1055,18 @@ class ModulopApp {
             </button>`).join("")}</div></section>`).join("")}
         </div>
         <aside class="library-detail">
-          <span class="library-detail__badge">${escapeHtml(categoryLabel(featured.category))}</span>
+          <span class="library-detail__badge">${escapeHtml(isApps ? featured.category : categoryLabel(featured.category))}</span>
           <div class="library-detail__preview">${icon(featured.icon, 42)}<i></i><i></i><i></i></div>
           <h3>${escapeHtml(featured.label)}</h3>
-          <p>${escapeHtml(moduleLibraryLongDescription(featured))}</p>
+          <p>${escapeHtml(isApps ? featured.description : moduleLibraryLongDescription(featured))}</p>
           <dl>
-            <div><dt>Données</dt><dd>Stockées dans le profil local</dd></div>
-            <div><dt>Rendus</dt><dd>Carte, grille, détail, export</dd></div>
-            <div><dt>Partage</dt><dd>Fragment proposé explicitement</dd></div>
+            ${isApps
+              ? `<div><dt>Type</dt><dd>App système locale</dd></div><div><dt>Rendus</dt><dd>${featured.renderModes.join(", ")}</dd></div><div><dt>Protocole</dt><dd>Aucune migration distante</dd></div>`
+              : `<div><dt>Données</dt><dd>Stockées dans le profil local</dd></div><div><dt>Rendus</dt><dd>Carte, grille, détail, export</dd></div><div><dt>Partage</dt><dd>Fragment proposé explicitement</dd></div>`}
           </dl>
-          <button type="button" class="soft-button is-primary" data-action="add-module" data-type="${featured.type}">${icon("Plus", 16)} Ajouter au profil</button>
+          ${isApps
+            ? `<button type="button" class="soft-button is-primary" data-action="open-system-app" data-app-id="${featured.id}">${icon("ArrowRight", 16)} Ouvrir</button>`
+            : `<button type="button" class="soft-button is-primary" data-action="add-module" data-type="${featured.type}">${icon("Plus", 16)} Ajouter au profil</button>`}
         </aside>
       </div>
     </section>`;
@@ -1569,12 +1590,74 @@ class ModulopApp {
     }, { history: false });
   }
 
-  announce(message) {
-    const toast = this.root.querySelector(".toast");
-    clearTimeout(this.toastTimer);
-    toast.textContent = message;
-    toast.classList.add("is-visible");
-    this.toastTimer = setTimeout(() => toast.classList.remove("is-visible"), 2400);
+  enqueueRealtimeNotifications(state = this.realtimeState) {
+    for (const offer of state.offers || []) {
+      if (!offer?.offerId || this.notifiedOfferIds.has(offer.offerId)) continue;
+      this.notifiedOfferIds.add(offer.offerId);
+      this.notify({
+        type: "fragment-offer",
+        title: "Fragment proposé",
+        message: offer.title || "Fragment",
+        tone: "accent",
+        duration: 9000,
+        actions: [
+          { label: "Importer", action: "live-accept-offer", offerId: offer.offerId },
+          { label: "Refuser", action: "live-decline-offer", offerId: offer.offerId }
+        ]
+      });
+    }
+    for (const fragment of state.receivedFragments || []) {
+      if (!fragment?.offerId || this.notifiedReceivedIds.has(fragment.offerId)) continue;
+      this.notifiedReceivedIds.add(fragment.offerId);
+      this.notify({
+        type: "fragment-ready",
+        title: "Fragment prêt",
+        message: fragment.title || "Fragment reçu",
+        tone: "success",
+        duration: 12000,
+        actions: [
+          { label: "Ajouter", action: "live-import-received", offerId: fragment.offerId },
+          { label: "Écarter", action: "live-discard-received", offerId: fragment.offerId }
+        ]
+      });
+    }
+  }
+
+  announce(message, options = {}) {
+    this.notify({ message, title: options.title || "", tone: options.tone || "neutral", duration: options.duration ?? 2600, actions: options.actions || [] });
+  }
+
+  notify({ title = "", message = "", tone = "neutral", duration = 2600, actions = [], type = "notice" } = {}) {
+    const id = crypto.randomUUID();
+    this.notifications = [{ id, title, message, tone, actions, type, createdAt: Date.now() }, ...this.notifications].slice(0, 5);
+    this.renderNotifications();
+    if (duration > 0) {
+      const timer = setTimeout(() => this.dismissNotification(id), duration);
+      this.notificationTimers.set(id, timer);
+    }
+    return id;
+  }
+
+  dismissNotification(id) {
+    if (!id) return;
+    clearTimeout(this.notificationTimers.get(id));
+    this.notificationTimers.delete(id);
+    this.notifications = this.notifications.filter((notification) => notification.id !== id);
+    this.renderNotifications();
+  }
+
+  renderNotifications() {
+    const stack = this.root.querySelector("[data-notifications]");
+    if (!stack) return;
+    stack.innerHTML = this.notifications.map((notification) => `<article class="notification notification--${notification.tone}" data-notification-id="${notification.id}">
+      <div class="notification__icon">${icon(notification.type?.startsWith("fragment") ? "PackageOpen" : "MessageSquareText", 17)}</div>
+      <div class="notification__content">
+        ${notification.title ? `<strong>${escapeHtml(notification.title)}</strong>` : ""}
+        <p>${escapeHtml(notification.message)}</p>
+        ${notification.actions?.length ? `<div class="notification__actions">${notification.actions.map((action) => `<button type="button" data-action="${action.action}" data-offer-id="${escapeAttribute(action.offerId || "")}" data-notification-id="${notification.id}">${escapeHtml(action.label)}</button>`).join("")}</div>` : ""}
+      </div>
+      <button type="button" class="notification__close" data-action="dismiss-notification" data-notification-id="${notification.id}" aria-label="Fermer">${icon("X", 14)}</button>
+    </article>`).join("");
   }
 
   resetRenderedGrid() {

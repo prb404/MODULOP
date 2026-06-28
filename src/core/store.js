@@ -302,14 +302,42 @@ export function normalizeWorkspaceSpace(profile) {
 function normalizeToolbarPreferences(prefs = {}) {
   const defaultOrder = ["spaces", "fragments", "presence", "import", "appearance", "settings", "help"];
   const order = Array.isArray(prefs.order) ? prefs.order.filter((item) => defaultOrder.includes(item)) : [];
+  const edge = ["left", "right", "top", "bottom", "free"].includes(prefs.edge) ? prefs.edge : "left";
+  const mode = prefs.mode === "float" || edge === "free" ? "float" : "dock";
+  const fallback = edge === "top" || edge === "bottom"
+    ? toolbarSizeForGrid(defaultOrder.length + 2, 1)
+    : toolbarSizeForGrid(1, defaultOrder.length + 2);
+  const width = quantizeToolbarExtent(prefs.width ?? prefs.size ?? fallback.width, "width");
+  const height = quantizeToolbarExtent(prefs.height ?? fallback.height, "height");
+  const columns = Math.max(1, Math.round((width - 16 + 8) / 48));
+  const rows = Math.max(1, Math.round((height - 16 + 8) / 48));
   return {
-    edge: ["left", "right", "top", "bottom", "free"].includes(prefs.edge) ? prefs.edge : "left",
+    mode,
+    edge,
     x: clampNumber(prefs.x, 0, 4096, 18),
     y: clampNumber(prefs.y, 0, 4096, 120),
-    size: clampNumber(prefs.size, 44, 72, 48),
-    expanded: Boolean(prefs.expanded),
+    width,
+    height,
+    columns,
+    rows,
+    preferredAxis: prefs.preferredAxis === "width" || prefs.preferredAxis === "height" ? prefs.preferredAxis : (edge === "top" || edge === "bottom" ? "width" : "height"),
     order: [...order, ...defaultOrder.filter((item) => !order.includes(item))]
   };
+}
+
+function toolbarSizeForGrid(columns = 1, rows = 1) {
+  return {
+    width: 16 + columns * 40 + Math.max(0, columns - 1) * 8,
+    height: 16 + rows * 40 + Math.max(0, rows - 1) * 8
+  };
+}
+
+function quantizeToolbarExtent(value, axis) {
+  const max = axis === "width" ? 760 : 620;
+  const number = Number(value);
+  const cells = clampNumber(Math.round(((Number.isFinite(number) ? number : 56) - 16 + 8) / 48), 1, 16, 1);
+  const size = toolbarSizeForGrid(axis === "width" ? cells : 1, axis === "height" ? cells : 1)[axis];
+  return clampNumber(size, 48, max, axis === "width" ? 56 : 440);
 }
 
 function normalizeModule(module) {

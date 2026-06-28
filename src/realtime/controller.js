@@ -396,38 +396,57 @@ export function realtimePanelBody(state, modules = [], space = {}) {
   const peers = state.presence || [];
   const personal = space?.kind === "personal" || space?.locked;
   const invite = state.privateRoom && state.inviteUrl ? state.inviteUrl : "";
-  return `<section class="live-panel">
-    <section class="live-command">
-      <div class="live-command__status">${icon(personal ? "LockKeyhole" : state.privateRoom ? "LockKeyhole" : "Radar", 24)}<span><strong>${online ? "Présences actives" : "Présences en veille"}</strong><small>${personal ? "Espace personnel verrouillé" : state.privateRoom ? "Lien privé actif" : "Espace configurable"}</small></span></div>
-      <label class="presence-switch"><input type="checkbox" data-live-enabled ${state.enabled ? "checked" : ""}><span><i></i><strong>Présence</strong><small>${online ? "visible dans le cercle" : "activer la coprésence"}</small></span></label>
-      <label class="field"><span>Cercle</span><input data-live-room value="${escapeAttribute(state.roomId)}"></label>
-      <div class="inline-actions">
-        <button type="button" class="soft-button is-primary" data-action="live-join">${icon("Radar", 16)} Se rendre présent</button>
-        ${personal ? "" : `<button type="button" class="soft-button" data-action="live-private-room">${icon("Fingerprint", 16)} Lien privé</button>`}
-        ${!personal && invite ? `<button type="button" class="soft-button" data-action="live-copy-invite">${icon("Link", 16)} Inviter</button>` : ""}
-        ${personal ? "" : `<button type="button" class="soft-button" data-action="live-ping">${icon("RadioTower", 16)} Ping</button>`}
-      </div>
-      ${!personal && invite ? `<label class="field live-invite-link"><span>Lien privé chiffré</span><input readonly value="${escapeAttribute(invite)}"></label>` : ""}
-      <p class="live-local-note">${personal ? "L’espace personnel ne reçoit pas d’invitation globale. Proposez uniquement des fragments et leurs traces." : "Cet espace peut accueillir un cercle, un lien privé et des échanges contextuels."}</p>
+  return `<section class="live-panel presence-app" data-system-app="presence">
+    <section class="live-command presence-card presence-card--status" data-presence-module="presence.status">
+      <div class="live-command__status">${icon(personal ? "LockKeyhole" : state.privateRoom ? "LockKeyhole" : "Radar", 24)}<span><strong>${online ? "Présence active" : "Présence en veille"}</strong><small>${personal ? "Partage fragmentaire seulement" : state.privateRoom ? "Lien privé actif" : "Cercle configurable"}</small></span></div>
+      <label class="presence-switch"><input type="checkbox" data-live-enabled ${state.enabled ? "checked" : ""}><span><i></i><strong>${state.enabled ? "Présence active" : "Activer ma présence"}</strong><small>${online ? "visible dans le cercle" : "aucun pair ne vous voit"}</small></span></label>
+      <p class="live-local-note">${personal ? "L’espace personnel reste privé. Seuls les fragments explicitement proposés et leurs traces publiques circulent." : "Cet espace peut accueillir un cercle, un lien privé et des échanges contextuels."}</p>
     </section>
-    <section class="live-zones">
-      <details class="live-zone live-zone--circle" open>
-        <summary><span>Cercle</span><small>${peers.length || 1} présent${peers.length > 1 ? "s" : ""}</small></summary>
+
+    <section class="presence-grid">
+      <article class="presence-card presence-card--circle" data-presence-module="presence.circle">
+        <header><div>${icon("Orbit", 18)}<strong>Cercle</strong></div><small>${peers.length || 1} présent${peers.length > 1 ? "s" : ""}</small></header>
+        <label class="field"><span>Identifiant du cercle</span><input data-live-room value="${escapeAttribute(state.roomId)}"></label>
+        <div class="inline-actions">
+          ${personal ? "" : `<button type="button" class="soft-button" data-action="live-private-room">${icon("Fingerprint", 16)} Lien privé</button>`}
+          ${!personal && invite ? `<button type="button" class="soft-button" data-action="live-copy-invite">${icon("Link", 16)} Inviter</button>` : ""}
+          ${personal ? "" : `<button type="button" class="soft-button" data-action="live-ping">${icon("RadioTower", 16)} Ping</button>`}
+        </div>
+        ${!personal && invite ? `<label class="field live-invite-link"><span>Lien privé chiffré</span><input readonly value="${escapeAttribute(invite)}"></label>` : ""}
         ${renderPeerGraph(peers, state)}
+      </article>
+
+      <article class="presence-card presence-card--peers" data-presence-module="presence.peers">
+        <header><div>${icon("UsersRound", 18)}<strong>Présences</strong></div><small>${peers.length || 1}</small></header>
         <div class="live-peer-list">${peers.map((peer) => renderPeer(peer, state)).join("") || `<p class="empty-spaces">Aucune présence détectée.</p>`}</div>
-      </details>
-      <details class="live-zone live-zone--traces" open>
-        <summary><span>Traces</span><small>${(state.activity || []).length} signal${(state.activity || []).length > 1 ? "s" : ""}</small></summary>
+      </article>
+
+      <article class="presence-card presence-card--traces" data-presence-module="presence.traces">
+        <header><div>${icon("Activity", 18)}<strong>Traces</strong></div><small>${(state.activity || []).length} signal${(state.activity || []).length > 1 ? "s" : ""}</small></header>
         <div class="live-activity-list">${(state.activity || []).map(renderActivity).join("") || `<p class="empty-spaces">Aucune trace pour le moment.</p>`}</div>
         <form class="live-chat-form" data-live-chat-form><input name="message" maxlength="800" placeholder="Message court ou ping"><button type="submit">${icon("ArrowRight", 16)}</button></form>
         <div class="live-feed">${state.messages.map(renderMessage).join("") || `<p class="empty-spaces">Aucun message.</p>`}</div>
+      </article>
+
+      <article class="presence-card presence-card--fragments" data-presence-module="presence.fragmentExchange">
+        <header><div>${icon("PackageOpen", 18)}<strong>Fragments</strong></div><small>${modules.length} disponible${modules.length > 1 ? "s" : ""}</small></header>
+        <h3>Proposer depuis l’espace</h3><div class="live-fragment-list">${modules.map(renderModuleOffer).join("") || `<p class="empty-spaces">Aucun fragment dans cet espace.</p>`}</div>
+        <h3>Propositions reçues</h3><div class="live-fragment-list">${state.offers.map(renderOffer).join("") || `<p class="empty-spaces">Aucun fragment proposé.</p>`}</div>
+        <h3>À importer</h3><div class="live-fragment-list">${state.receivedFragments.map(renderReceived).join("") || `<p class="empty-spaces">Aucun fragment en attente.</p>`}</div>
+      </article>
+
+      <article class="presence-card presence-card--wide" data-presence-module="presence.fragmentTraces">
+        <header><div>${icon("MessageCircle", 18)}<strong>Échanges par fragment</strong></div><small>${modules.length}</small></header>
         <div class="live-discussion-list">${modules.map((module) => renderDiscussion(module, state)).join("") || `<p class="empty-spaces">Aucun fragment dans cet espace.</p>`}</div>
-      </details>
-      <details class="live-zone live-zone--fragments" open>
-        <summary><span>Fragments</span><small>${modules.length} disponible${modules.length > 1 ? "s" : ""}</small></summary>
-        <h3>Partager un fragment</h3><div class="live-fragment-list">${modules.map(renderModuleOffer).join("") || `<p class="empty-spaces">Aucun fragment dans cet espace.</p>`}</div>
-        <h3>Fragments proposés</h3><div class="live-fragment-list">${state.offers.map(renderOffer).join("") || `<p class="empty-spaces">Aucun fragment proposé.</p>`}</div>
-        <h3>Fragments à importer</h3><div class="live-fragment-list">${state.receivedFragments.map(renderReceived).join("") || `<p class="empty-spaces">Aucun fragment en attente.</p>`}</div>
+      </article>
+
+      <details class="presence-card presence-card--advanced" data-presence-module="presence.advanced">
+        <summary><span>${icon("SlidersHorizontal", 18)} Avancé</span><small>IDs et masquages</small></summary>
+        <dl class="live-advanced-list">
+          <div><dt>Identité locale</dt><dd>${escapeHtml(shortPeerId(state.identity?.peerId || ""))}</dd></div>
+          <div><dt>Cercle</dt><dd>${escapeHtml(state.roomId)}</dd></div>
+          <div><dt>Transport</dt><dd>${online ? "P2P" : "local"}</dd></div>
+        </dl>
         <h3>Présences masquées</h3><div class="live-fragment-list">${(state.blockedPeers || []).map(renderBlockedPeer).join("") || `<p class="empty-spaces">Aucune présence masquée.</p>`}</div>
       </details>
     </section>
@@ -437,10 +456,12 @@ export function realtimePanelBody(state, modules = [], space = {}) {
 function renderPeer(peer, state) {
   const self = peer.peerId === state?.identity?.peerId;
   return `<article class="live-peer" data-peer-id="${escapeAttribute(peer.peerId)}">
-    <span class="live-peer__avatar">${visualPreview(peer.avatar)}</span>
-    <button type="button" class="live-peer__main" data-action="live-focus-peer" data-peer-id="${escapeAttribute(peer.peerId)}" data-module-id="${escapeAttribute(peer.selectedModuleId || "")}"><strong>${escapeHtml(peer.displayName || peer.nickname || "Présence")}</strong><small>${peer.moduleCount || 0} fragment${peer.moduleCount > 1 ? "s" : ""} · ${peer.traceCount || 0} trace${peer.traceCount > 1 ? "s" : ""}${peer.selectedModuleId ? " · actif sur un fragment" : ""}</small></button>
-    <code>${escapeHtml(shortPeerId(peer.peerId))}</code>
-    ${self ? "" : `<button type="button" data-action="live-block-peer" data-peer-id="${escapeAttribute(peer.peerId)}">${icon("ShieldOff", 15)}</button>`}
+    <button type="button" class="live-peer__focus" data-action="live-focus-peer" data-peer-id="${escapeAttribute(peer.peerId)}" data-module-id="${escapeAttribute(peer.selectedModuleId || "")}">
+      <span class="live-peer__avatar">${visualPreview(peer.avatar)}</span>
+      <span class="live-peer__main"><strong>${escapeHtml(peer.displayName || peer.nickname || "Présence")}</strong><small>${peer.moduleCount || 0} fragment${peer.moduleCount > 1 ? "s" : ""} · ${peer.traceCount || 0} trace${peer.traceCount > 1 ? "s" : ""}${peer.selectedModuleId ? " · actif sur un fragment" : ""}</small></span>
+      <code>${escapeHtml(shortPeerId(peer.peerId))}</code>
+    </button>
+    ${self ? "" : `<button type="button" class="live-peer__block" data-action="live-block-peer" data-peer-id="${escapeAttribute(peer.peerId)}">${icon("ShieldOff", 15)}</button>`}
     <dl class="live-peer-card">
       <div><dt>Identité</dt><dd>${escapeHtml(peer.peerId || "local")}</dd></div>
       <div><dt>Cercle</dt><dd>${escapeHtml(peer.roomId || state.roomId)}</dd></div>

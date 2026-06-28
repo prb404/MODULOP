@@ -46,6 +46,8 @@ describe("persistance locale", () => {
     expect(legacy.space).toMatchObject({ kind: "workspace", title: "Ancien profil", visibility: "private", locked: false });
     expect(legacy.uiPreferences.moduleActions.visibleShortcuts).toBe(1);
     expect(legacy.uiPreferences.commandToolbar.edge).toBe("left");
+    expect(legacy.uiPreferences.commandToolbar.mode).toBe("dock");
+    expect(legacy.uiPreferences.commandToolbar.rows).toBeGreaterThan(1);
     expect(legacy.uiPreferences.panels.editor.edge).toBe("right");
     expect(legacy.realtimeTraces.comments).toEqual([]);
     expect(legacy.realtimeTraces.reactions).toEqual([]);

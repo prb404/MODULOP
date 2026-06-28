@@ -45,6 +45,9 @@ async function runDesktopQa(browser) {
   attachDiagnostics(page, "desktop");
   await page.goto(`${baseUrl}?home=1`, { waitUntil: "domcontentloaded", timeout: 20000 });
   await assertVisible(page, ".welcome-hero", "accueil");
+  await assertAbsent(page, ".workspace-presence-strip", "strip présence supprimée");
+  await assertVisible(page, ".command-toolbar--adaptive", "toolbar adaptative");
+  await exerciseToolbar(page);
   await page.screenshot({ path: join(qaDir, "home-desktop.png"), fullPage: true });
 
   await page.getByRole("button", { name: /Espace vierge/i }).click();
@@ -54,6 +57,9 @@ async function runDesktopQa(browser) {
 
   await page.locator(".blank-workspace [data-action='open-library']").click();
   await assertVisible(page, ".panel--library", "bibliothèque espace vierge");
+  await page.locator("[data-action='library-filter'][data-library-kind='apps']").click();
+  await assertVisible(page, ".system-app-card[data-app-id='presence']", "catalogue apps système");
+  await page.locator("[data-action='library-filter'][data-library-kind='fragments']").click();
   await page.locator(".catalog-card[data-type='rich-text']").click();
   await page.waitForSelector(".module[data-load-state='ready']", { timeout: 12000 });
   await assertNoOverlap(page);
@@ -62,9 +68,9 @@ async function runDesktopQa(browser) {
   const module = page.locator(".module").first();
   await module.dblclick();
   await assertVisible(page, ".panel--rich-text", "panneau d’action principale");
-  await page.getByRole("button", { name: "Fermer", exact: true }).click();
+  await page.locator(".panel--rich-text [data-action='close-panel']").click();
 
-  await page.locator(".command-toolbar [data-action='open-menu']").click();
+  await clickToolbarAction(page, "open-menu");
   await assertVisible(page, ".panel--menu", "menu profil");
   await page.getByRole("button", { name: /Espaces et modèles/i }).click();
   await assertVisible(page, ".welcome-section--spaces", "liste des espaces");
@@ -84,6 +90,7 @@ async function runMobileQa(browser) {
   attachDiagnostics(page, "mobile");
   await page.goto(`${baseUrl}?home=1`, { waitUntil: "domcontentloaded", timeout: 20000 });
   await assertVisible(page, ".welcome-hero", "accueil mobile");
+  await assertAbsent(page, ".workspace-presence-strip", "strip présence supprimée mobile");
   await page.screenshot({ path: join(qaDir, "home-mobile.png"), fullPage: true });
 
   await page.getByRole("button", { name: /Web & médias/i }).click();
@@ -91,6 +98,34 @@ async function runMobileQa(browser) {
   await assertNoHorizontalOverflow(page);
   await page.screenshot({ path: join(qaDir, "media-mobile.png"), fullPage: true });
   await context.close();
+}
+
+async function exerciseToolbar(page) {
+  const toolbar = page.locator(".command-toolbar--adaptive").first();
+  await assertVisible(page, ".command-toolbar__resize--s", "poignée toolbar");
+  const source = toolbar.locator("[data-toolbar-tool-id='presence']");
+  const target = toolbar.locator("[data-toolbar-tool-id='spaces']");
+  await source.dragTo(target).catch(() => null);
+  const handle = page.locator(".command-toolbar__resize--s").first();
+  const box = await handle.boundingBox();
+  if (!box) throw new Error("Poignée basse toolbar introuvable");
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2, box.y - 260, { steps: 8 });
+  await page.mouse.up();
+  await assertVisible(page, ".command-toolbar__overflow-toggle", "overflow toolbar");
+  await page.locator(".command-toolbar__overflow-toggle").click();
+  await assertVisible(page, ".command-toolbar__overflow.is-open", "menu overflow toolbar");
+}
+
+async function clickToolbarAction(page, action) {
+  const visibleButton = page.locator(`.command-toolbar [data-action='${action}']:visible`).first();
+  if (await visibleButton.count()) {
+    await visibleButton.click();
+    return;
+  }
+  await page.locator(".command-toolbar__overflow-toggle").click();
+  await page.locator(`.command-toolbar__overflow [data-action='${action}']`).click();
 }
 
 async function assertVisible(page, selector, label) {
@@ -110,6 +145,11 @@ async function assertVisible(page, selector, label) {
     }));
     throw new Error(`${label} introuvable ou masqué: ${selector}\n${JSON.stringify(state, null, 2)}`);
   }
+}
+
+async function assertAbsent(page, selector, label) {
+  const count = await page.locator(selector).count();
+  if (count) throw new Error(`${label}: ${selector} ne devrait plus être dans le DOM`);
 }
 
 function attachDiagnostics(page, label) {

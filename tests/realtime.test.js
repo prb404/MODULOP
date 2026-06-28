@@ -97,6 +97,8 @@ describe("couche realtime P2P", () => {
     expect(html).toContain("data-action=\"live-ping\"");
     expect(html).toContain("live-peer-card");
     expect(html).toContain("Cet espace peut accueillir un cercle");
+    expect(html).toContain("Présence active");
+    expect(html).not.toContain("Se rendre présent");
     expect(html).toContain("data-action=\"live-decline-offer\"");
     expect(html).toContain("data-action=\"live-discard-received\"");
     expect(html).toContain("Pair Atelier");
@@ -120,8 +122,8 @@ describe("couche realtime P2P", () => {
       inviteUrl: "https://example.test/#room=secret"
     }, [{ id: "m1", title: "Fragment", type: "rich-text" }], { kind: "personal", title: "Espace personnel", visibility: "private", locked: true });
 
-    expect(html).toContain("Espace personnel verrouillé");
-    expect(html).toContain("Proposez uniquement des fragments");
+    expect(html).toContain("Partage fragmentaire seulement");
+    expect(html).toContain("Seuls les fragments explicitement proposés");
     expect(html).not.toContain("data-action=\"live-copy-invite\"");
     expect(html).not.toContain("data-action=\"live-ping\"");
   });

@@ -66,7 +66,7 @@ async function runRealtimeQa(browser) {
     await assertVisible(alpha.page, ".live-peer-card", "carte pair alpha");
     await assertVisible(alpha.page, ".live-message", "message alpha");
     await assertVisible(alpha.page, ".live-comment", "commentaire local alpha");
-    await assertVisible(alpha.page, ".toast.is-visible", "toast offre alpha");
+    await assertVisible(beta.page, ".notification", "notification fragment beta");
     await assertLiveHealthy(alpha.page, "alpha");
     await assertLiveHealthy(beta.page, "beta");
 
@@ -112,9 +112,15 @@ async function openLivePanel(page) {
 
 async function joinRoom(page, room) {
   await page.locator("[data-live-room]").fill(room);
-  await page.locator("[data-action='live-join']").evaluate((button) => button.click());
+  const enabled = page.locator("[data-live-enabled]");
+  if (!(await enabled.isChecked())) {
+    await enabled.evaluate((input) => {
+      input.checked = true;
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  }
   try {
-    await page.waitForFunction(() => document.querySelector(".live-command__status")?.innerText.includes("Présences actives"), null, { timeout: 12000 });
+    await page.waitForFunction(() => document.querySelector(".live-command__status")?.innerText.includes("Présence active"), null, { timeout: 12000 });
     await page.waitForSelector(".live-peer", { timeout: 12000 });
   } catch (error) {
     const state = await page.evaluate(() => ({
@@ -122,7 +128,7 @@ async function joinRoom(page, room) {
       panel: document.querySelector(".live-panel")?.innerText || "",
       checked: document.querySelector("[data-live-enabled]")?.checked ?? null,
       room: document.querySelector("[data-live-room]")?.value || "",
-      toast: document.querySelector(".toast")?.innerText || ""
+      notification: document.querySelector(".notification")?.innerText || ""
     }));
     throw new Error(`Join Live incomplet\n${JSON.stringify(state, null, 2)}\n${error.stack || error}`);
   }
@@ -147,16 +153,22 @@ async function addFragmentComment(page, text) {
 async function acceptAndImportOfferedFragment(page) {
   await page.locator("[data-action='live-accept-offer']").first().waitFor({ state: "visible", timeout: 18000 });
   const before = await page.locator(".module[data-load-state='ready']").count();
-  await page.locator("[data-action='live-accept-offer']").first().click();
+  await page.locator(".notification [data-action='live-accept-offer']").first().click().catch(async () => {
+    await page.locator("[data-action='live-accept-offer']").first().click();
+  });
   await page.locator("[data-action='live-import-received']").first().waitFor({ state: "visible", timeout: 18000 });
-  await page.locator("[data-action='live-import-received']").first().click();
+  await page.locator(".notification [data-action='live-import-received']").first().click().catch(async () => {
+    await page.locator("[data-action='live-import-received']").first().click();
+  });
   await page.waitForFunction((count) => document.querySelectorAll(".module[data-load-state='ready']").length > count, before, { timeout: 18000 });
 }
 
 async function declineOfferedFragment(page) {
   await page.locator("[data-action='live-decline-offer']").first().waitFor({ state: "visible", timeout: 18000 });
-  await page.locator("[data-action='live-decline-offer']").first().click();
-  await page.waitForFunction(() => !document.querySelector("[data-action='live-decline-offer']"), null, { timeout: 8000 });
+  await page.locator(".notification [data-action='live-decline-offer']").first().click().catch(async () => {
+    await page.locator("#panel-host [data-action='live-decline-offer']").first().click();
+  });
+  await page.waitForFunction(() => !document.querySelector("#panel-host [data-action='live-decline-offer']"), null, { timeout: 8000 });
 }
 
 async function waitForPeerDiscovery(...args) {
@@ -180,7 +192,7 @@ async function assertLiveHealthy(page, label) {
     livePeers: document.querySelectorAll(".live-peer").length,
     horizontalOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth
   }));
-  if (!state.status.includes("Présences")) throw new Error(`${label}: statut Présences absent\n${JSON.stringify(state, null, 2)}`);
+  if (!state.status.includes("Présence")) throw new Error(`${label}: statut Présence absent\n${JSON.stringify(state, null, 2)}`);
   if (state.circle !== roomId) throw new Error(`${label}: cercle absent du panneau Présences\n${JSON.stringify(state, null, 2)}`);
   if (state.moduleCount < 1) throw new Error(`${label}: aucun fragment pret\n${JSON.stringify(state, null, 2)}`);
   if (state.livePeers < 1) throw new Error(`${label}: presence locale absente\n${JSON.stringify(state, null, 2)}`);
