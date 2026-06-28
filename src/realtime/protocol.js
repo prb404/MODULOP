@@ -1,3 +1,5 @@
+import { randomRoomSecret } from "./room-crypto.js";
+
 export const REALTIME_VERSION = 1;
 export const DEFAULT_ROOM = "modulop:v1:lobby";
 export const MESSAGE_TYPES = new Set([
@@ -28,7 +30,7 @@ export function createEnvelope({ type, from, room, publicKey, seq, payload = {},
     ts: Date.now(),
     seq,
     publicKey,
-    payload: sanitizePayload(type, payload)
+    payload: payload?.encrypted ? sanitizeEncryptedPayload(payload) : sanitizePayload(type, payload)
   };
 }
 
@@ -100,7 +102,19 @@ export function normalizeRoomId(value) {
 }
 
 export function createPrivateRoom() {
-  return `modulop:v1:${crypto.randomUUID().slice(0, 8)}-${crypto.randomUUID().slice(0, 8)}`;
+  return {
+    roomId: `modulop:v1:${crypto.randomUUID().slice(0, 8)}-${crypto.randomUUID().slice(0, 8)}`,
+    secret: randomRoomSecret()
+  };
+}
+
+function sanitizeEncryptedPayload(payload = {}) {
+  return {
+    encrypted: true,
+    alg: limit(payload.alg || "A256GCM", 16),
+    iv: limit(payload.iv, 64),
+    data: limit(payload.data, 12 * 1024 * 1024)
+  };
 }
 
 function sanitizeAvatar(avatar) {

@@ -1,15 +1,18 @@
 import { joinRoom, selfId } from "trystero";
-import { createEnvelope, validateEnvelope } from "./protocol.js";
+import { createEnvelope, sanitizePayload, validateEnvelope } from "./protocol.js";
 import { signEnvelope, verifyEnvelope } from "./identity.js";
+import { decryptRoomBytes, decryptRoomPayload, encryptRoomBytes, encryptRoomPayload } from "./room-crypto.js";
 
 const APP_ID = "modulop-p2p-v1";
 const HEARTBEAT_MS = 15000;
+const SEND_TIMEOUT_MS = 2500;
 
 export class LocalRealtimeProvider extends EventTarget {
-  constructor({ identity, roomId, getCard }) {
+  constructor({ identity, roomId, roomSecret = "", getCard }) {
     super();
     this.identity = identity;
     this.roomId = roomId;
+    this.roomSecret = roomSecret;
     this.getCard = getCard;
     this.seq = 0;
     this.status = "local";
@@ -51,6 +54,7 @@ export class LocalRealtimeProvider extends EventTarget {
 
   async offerFragment() {}
   async acceptOffer() {}
+  async declineOffer() {}
 
   publishPresence() {
     const self = this.localCard || { ...this.getCard(), lastSeen: Date.now(), transportPeerId: "local" };
@@ -85,10 +89,11 @@ export class TrysteroRealtimeProvider extends LocalRealtimeProvider {
         this.publishPresence();
       };
       this.status = "p2p";
-      await this.updatePresence();
-      await this.sendEnvelope("presence.hello", this.getCard());
-      this.heartbeatTimer = setInterval(() => this.sendEnvelope("presence.heartbeat", this.getCard()), HEARTBEAT_MS);
+      await super.updatePresence();
       this.dispatchStatus();
+      this.sendEnvelope("profile.announce", this.getCard()).catch(() => {});
+      this.sendEnvelope("presence.hello", this.getCard()).catch(() => {});
+      this.heartbeatTimer = setInterval(() => this.sendEnvelope("presence.heartbeat", this.getCard()).catch(() => {}), HEARTBEAT_MS);
     } catch (error) {
       this.status = "local";
       this.dispatchEvent(new CustomEvent("error", { detail: error }));
@@ -145,9 +150,13 @@ export class TrysteroRealtimeProvider extends LocalRealtimeProvider {
     await this.sendEnvelope("fragment.request", { offerId: offer.offerId }, { target: targetPeerId });
   }
 
+  async declineOffer(offer, targetPeerId) {
+    await this.sendEnvelope("fragment.cancel", { offerId: offer.offerId }, { target: targetPeerId });
+  }
+
   async sendEnvelope(type, payload, options = {}) {
     if (!this.action) return null;
-    const envelope = await signEnvelope(this.identity, createEnvelope({
+    const envelope = createEnvelope({
       type,
       from: this.identity.peerId,
       room: this.roomId,
@@ -155,15 +164,20 @@ export class TrysteroRealtimeProvider extends LocalRealtimeProvider {
       seq: this.seq++,
       payload,
       target: options.target || null
-    }));
-    await this.action.send(envelope, options.target ? { target: options.target } : undefined);
-    return envelope;
+    });
+    if (this.roomSecret) envelope.payload = await encryptRoomPayload(envelope.payload, this.roomSecret);
+    const signed = await signEnvelope(this.identity, envelope);
+    await bestEffortSend(this.action.send(signed, options.target ? { target: options.target } : undefined));
+    return signed;
   }
 
   async receiveEnvelope(envelope, transportPeerId) {
     if (!validateEnvelope(envelope, this.roomId) || envelope.from === this.identity.peerId) return;
     if (envelope.target && envelope.target !== selfId) return;
     if (!await verifyEnvelope(envelope)) return;
+    const payload = await decryptRoomPayload(envelope.payload, this.roomSecret);
+    if (!payload) return;
+    envelope = { ...envelope, payload: sanitizePayload(envelope.type, payload) };
     if (["presence.hello", "presence.heartbeat", "profile.announce"].includes(envelope.type)) {
       this.peers.set(envelope.from, { ...envelope.payload, peerId: envelope.from, transportPeerId, lastSeen: Date.now() });
       this.publishPresence();
@@ -193,21 +207,39 @@ export class TrysteroRealtimeProvider extends LocalRealtimeProvider {
     }
     if (envelope.type === "fragment.request") {
       const file = this.pendingFiles?.get(envelope.payload.offerId);
-      if (file) await this.fileAction.send(file.bytes, { target: transportPeerId, metadata: { ...file.offer, from: this.identity.peerId } });
+      if (file) {
+        const encrypted = await encryptRoomBytes(file.bytes, this.roomSecret);
+        await bestEffortSend(this.fileAction.send(encrypted.bytes, { target: transportPeerId, metadata: { ...file.offer, ...encrypted.metadata, from: this.identity.peerId } }));
+      }
+    }
+    if (envelope.type === "fragment.cancel") {
+      this.pendingFiles?.delete(envelope.payload.offerId);
+      this.dispatchEvent(new CustomEvent("cancel", { detail: { ...envelope.payload, from: envelope.from, createdAt: envelope.ts } }));
     }
   }
 
-  receiveFragment(data, meta = {}) {
+  async receiveFragment(data, meta = {}) {
     const metadata = meta.metadata || {};
+    const bytes = await decryptRoomBytes(data, metadata, this.roomSecret);
+    if (!bytes) return;
     this.dispatchEvent(new CustomEvent("fragment", {
       detail: {
         offerId: metadata.offerId,
         title: metadata.title,
         moduleType: metadata.moduleType,
         from: metadata.from || meta.peerId,
-        bytes: data,
+        bytes,
         createdAt: Date.now()
       }
     }));
   }
+}
+
+async function bestEffortSend(sendPromise) {
+  try {
+    await Promise.race([
+      sendPromise,
+      new Promise((resolve) => setTimeout(resolve, SEND_TIMEOUT_MS))
+    ]);
+  } catch {}
 }

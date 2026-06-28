@@ -578,12 +578,16 @@ class ModulopApp {
     if (action === "import") this.root.querySelector("#import-input").click();
     if (action === "live-join") await this.realtime.connect(this.root.querySelector("[data-live-room]")?.value);
     if (action === "live-private-room") {
-      this.realtime.createPrivateRoom();
+      await this.realtime.createPrivateRoom();
       this.renderPanel();
     }
+    if (action === "live-copy-invite") await this.realtime.copyInviteLink();
+    if (action === "live-ping") await this.realtime.sendPing(`Ping ${new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}`);
     if (action === "live-offer-fragment") await this.realtime.offerModule(this.store.profile.modules.find((item) => item.id === id));
     if (action === "live-accept-offer") await this.realtime.acceptOffer(button.dataset.offerId);
+    if (action === "live-decline-offer") await this.realtime.declineOffer(button.dataset.offerId);
     if (action === "live-import-received") await this.realtime.importReceived(button.dataset.offerId);
+    if (action === "live-discard-received") this.realtime.discardReceived(button.dataset.offerId);
     if (action === "live-block-peer") this.realtime.blockPeer(button.dataset.peerId);
     if (action === "live-unblock-peer") this.realtime.unblockPeer(button.dataset.peerId);
     if (action === "live-react") await this.realtime.toggleReaction({

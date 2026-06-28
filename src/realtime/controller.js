@@ -4,9 +4,11 @@ import { escapeHtml } from "../renderers/index.js";
 import { icon } from "../ui/icons.js";
 import { getRealtimeIdentity, publicCardFromProfile } from "./identity.js";
 import { createPrivateRoom, DEFAULT_ROOM, normalizeRoomId } from "./protocol.js";
+import { normalizeRoomSecret, privateRoomInviteUrl, roomFromHash, roomSecretFromHash } from "./room-crypto.js";
 import { LocalRealtimeProvider, TrysteroRealtimeProvider } from "./transport.js";
 
 const ROOM_KEY = "modulop.realtime.room";
+const ROOM_SECRET_KEY = "modulop.realtime.roomSecret";
 const ENABLED_KEY = "modulop.realtime.enabled";
 const BLOCKED_KEY = "modulop.realtime.blockedPeers";
 const RATE_WINDOW_MS = 60_000;
@@ -19,7 +21,12 @@ export class RealtimeController extends EventTarget {
     this.getProfile = getProfile;
     this.importModule = importModule;
     this.announce = announce;
-    this.roomId = normalizeRoomId(localStorage.getItem(ROOM_KEY) || DEFAULT_ROOM);
+    const hashRoom = roomFromHash();
+    const hashSecret = roomSecretFromHash();
+    this.roomId = normalizeRoomId(hashRoom || localStorage.getItem(ROOM_KEY) || DEFAULT_ROOM);
+    this.roomSecret = normalizeRoomSecret(hashSecret || localStorage.getItem(ROOM_SECRET_KEY) || "");
+    if (hashRoom) localStorage.setItem(ROOM_KEY, this.roomId);
+    if (hashSecret) localStorage.setItem(ROOM_SECRET_KEY, this.roomSecret);
     this.enabled = localStorage.getItem(ENABLED_KEY) === "true";
     this.status = "local";
     this.presence = [];
@@ -43,12 +50,15 @@ export class RealtimeController extends EventTarget {
   async connect(roomId = this.roomId) {
     this.roomId = normalizeRoomId(roomId);
     localStorage.setItem(ROOM_KEY, this.roomId);
+    this.persistRoomSecret();
+    this.updateInviteHash();
     localStorage.setItem(ENABLED_KEY, "true");
     this.enabled = true;
     await this.provider?.disconnect?.();
     this.provider = new TrysteroRealtimeProvider({
       identity: this.identity,
       roomId: this.roomId,
+      roomSecret: this.roomSecret,
       getCard: () => publicCardFromProfile(this.getProfile(), this.identity, this.roomId)
     });
     this.bindProvider();
@@ -67,6 +77,7 @@ export class RealtimeController extends EventTarget {
     this.provider = new LocalRealtimeProvider({
       identity: this.identity,
       roomId: this.roomId,
+      roomSecret: this.roomSecret,
       getCard: () => publicCardFromProfile(this.getProfile(), this.identity, this.roomId)
     });
     this.bindProvider();
@@ -114,6 +125,14 @@ export class RealtimeController extends EventTarget {
       this.receivedFragments = [event.detail, ...this.receivedFragments].slice(0, 20);
       this.recordActivity("fragment.receive", event.detail);
       this.announce?.(`Fragment reçu : ${event.detail.title}`);
+      this.emitChange();
+    });
+    this.provider.addEventListener("cancel", (event) => {
+      if (!this.acceptEvent("cancel", event.detail)) return;
+      const offer = this.offers.find((item) => item.offerId === event.detail.offerId);
+      this.offers = this.offers.filter((item) => item.offerId !== event.detail.offerId);
+      this.receivedFragments = this.receivedFragments.filter((item) => item.offerId !== event.detail.offerId);
+      this.recordActivity("fragment.cancel", { ...event.detail, title: offer?.title || "Fragment refusé" });
       this.emitChange();
     });
     this.provider.addEventListener("error", () => {
@@ -177,8 +196,19 @@ export class RealtimeController extends EventTarget {
   async acceptOffer(offerId) {
     const offer = this.offers.find((item) => item.offerId === offerId);
     if (!offer) return;
+    this.offers = this.offers.filter((item) => item.offerId !== offerId);
     await this.provider?.acceptOffer(offer, offer.transportPeerId);
     this.announce?.("Demande de fragment envoyée");
+    this.emitChange();
+  }
+
+  async declineOffer(offerId) {
+    const offer = this.offers.find((item) => item.offerId === offerId);
+    if (!offer) return;
+    this.offers = this.offers.filter((item) => item.offerId !== offerId);
+    await this.provider?.declineOffer?.(offer, offer.transportPeerId);
+    this.announce?.("Offre de fragment refusée");
+    this.emitChange();
   }
 
   async importReceived(offerId) {
@@ -191,14 +221,60 @@ export class RealtimeController extends EventTarget {
     this.emitChange();
   }
 
-  setRoom(roomId) {
-    this.roomId = normalizeRoomId(roomId);
-    localStorage.setItem(ROOM_KEY, this.roomId);
+  discardReceived(offerId) {
+    this.receivedFragments = this.receivedFragments.filter((item) => item.offerId !== offerId);
+    this.announce?.("Fragment reçu écarté");
     this.emitChange();
   }
 
-  createPrivateRoom() {
-    this.setRoom(createPrivateRoom());
+  setRoom(roomId) {
+    this.roomId = normalizeRoomId(roomId);
+    localStorage.setItem(ROOM_KEY, this.roomId);
+    this.roomSecret = "";
+    this.persistRoomSecret();
+    this.emitChange();
+  }
+
+  async createPrivateRoom() {
+    const room = createPrivateRoom();
+    this.roomId = room.roomId;
+    this.roomSecret = room.secret;
+    localStorage.setItem(ROOM_KEY, this.roomId);
+    this.persistRoomSecret();
+    this.updateInviteHash();
+    this.announce?.("Room privée générée, lien d’invitation prêt");
+    if (this.enabled) {
+      await this.connect(this.roomId);
+      return;
+    }
+    this.emitChange();
+  }
+
+  async copyInviteLink() {
+    if (!this.roomSecret) await this.createPrivateRoom();
+    const inviteUrl = this.inviteUrl();
+    navigator.clipboard?.writeText?.(inviteUrl).then(
+      () => this.announce?.("Lien d’invitation copié"),
+      () => this.announce?.("Copie indisponible, lien affiché dans le panneau")
+    );
+    this.emitChange();
+    return inviteUrl;
+  }
+
+  inviteUrl() {
+    return this.roomSecret ? privateRoomInviteUrl(this.roomId, this.roomSecret) : "";
+  }
+
+  updateInviteHash() {
+    if (!this.roomSecret || !globalThis.history?.replaceState) return;
+    const url = new URL(location.href);
+    url.hash = new URLSearchParams({ room: this.roomId, key: this.roomSecret }).toString();
+    history.replaceState(null, "", url);
+  }
+
+  persistRoomSecret() {
+    if (this.roomSecret) localStorage.setItem(ROOM_SECRET_KEY, this.roomSecret);
+    else localStorage.removeItem(ROOM_SECRET_KEY);
   }
 
   blockPeer(peerId) {
@@ -281,6 +357,9 @@ export class RealtimeController extends EventTarget {
     return {
       identity: this.identity,
       roomId: this.roomId,
+      roomSecret: this.roomSecret,
+      inviteUrl: this.inviteUrl(),
+      privateRoom: Boolean(this.roomSecret),
       enabled: this.enabled,
       status: this.status,
       presence: this.presence,
@@ -305,9 +384,10 @@ export function realtimeBadge(state) {
 export function realtimePanelBody(state, modules = []) {
   const online = state.status === "p2p";
   const peers = state.presence || [];
+  const invite = state.privateRoom && state.inviteUrl ? state.inviteUrl : "";
   return `<section class="live-panel">
     <section class="live-status-card">
-      <div>${icon("Radar", 22)}<span><strong>${online ? "Coprésence P2P active" : "Coprésence locale"}</strong><small>${escapeHtml(state.roomId)}</small></span></div>
+      <div>${icon(state.privateRoom ? "LockKeyhole" : "Radar", 22)}<span><strong>${online ? "Coprésence P2P active" : "Coprésence locale"}</strong><small>${escapeHtml(state.privateRoom ? `${state.roomId} · chiffrée` : state.roomId)}</small></span></div>
       <label class="switch-row switch-row--compact"><span>Live</span><input type="checkbox" data-live-enabled ${state.enabled ? "checked" : ""}></label>
     </section>
     <section class="live-room-tools">
@@ -315,8 +395,12 @@ export function realtimePanelBody(state, modules = []) {
       <div class="inline-actions">
         <button type="button" class="soft-button is-primary" data-action="live-join">${icon("Radar", 16)} Rejoindre</button>
         <button type="button" class="soft-button" data-action="live-private-room">${icon("Fingerprint", 16)} Privée</button>
+        ${invite ? `<button type="button" class="soft-button" data-action="live-copy-invite">${icon("Link", 16)} Inviter</button>` : ""}
+        <button type="button" class="soft-button" data-action="live-ping">${icon("RadioTower", 16)} Ping</button>
       </div>
+      ${invite ? `<label class="field live-invite-link"><span>Lien privé chiffré</span><input readonly value="${escapeAttribute(invite)}"></label>` : ""}
     </section>
+    <section class="live-section"><h3>Constellation</h3>${renderPeerGraph(peers, state)}</section>
     <section class="live-section"><h3>Présences</h3><div class="live-peer-list">${peers.map((peer) => renderPeer(peer, state)).join("") || `<p class="empty-spaces">Aucun pair détecté.</p>`}</div></section>
     <section class="live-section"><h3>Activité</h3><div class="live-activity-list">${(state.activity || []).map(renderActivity).join("") || `<p class="empty-spaces">Aucune activité distante.</p>`}</div></section>
     <section class="live-section"><h3>Messages</h3>
@@ -333,7 +417,40 @@ export function realtimePanelBody(state, modules = []) {
 
 function renderPeer(peer, state) {
   const self = peer.peerId === state?.identity?.peerId;
-  return `<article class="live-peer"><span class="live-peer__avatar">${visualPreview(peer.avatar)}</span><span><strong>${escapeHtml(peer.displayName || peer.nickname || "Pair")}</strong><small>${peer.moduleCount || 0} fragment${peer.moduleCount > 1 ? "s" : ""}${peer.selectedModuleId ? " · actif sur un fragment" : ""}</small></span>${self ? "" : `<button type="button" data-action="live-block-peer" data-peer-id="${escapeAttribute(peer.peerId)}">${icon("ShieldOff", 15)}</button>`}</article>`;
+  return `<article class="live-peer">
+    <span class="live-peer__avatar">${visualPreview(peer.avatar)}</span>
+    <span><strong>${escapeHtml(peer.displayName || peer.nickname || "Pair")}</strong><small>${peer.moduleCount || 0} fragment${peer.moduleCount > 1 ? "s" : ""}${peer.selectedModuleId ? " · actif sur un fragment" : ""}</small></span>
+    <code>${escapeHtml(shortPeerId(peer.peerId))}</code>
+    ${self ? "" : `<button type="button" data-action="live-block-peer" data-peer-id="${escapeAttribute(peer.peerId)}">${icon("ShieldOff", 15)}</button>`}
+    <dl class="live-peer-card">
+      <div><dt>Pair</dt><dd>${escapeHtml(peer.peerId || "local")}</dd></div>
+      <div><dt>Room</dt><dd>${escapeHtml(peer.roomId || state.roomId)}</dd></div>
+      <div><dt>Fragments publics</dt><dd>${peer.moduleCount || 0}</dd></div>
+      <div><dt>Dernier signal</dt><dd>${peer.lastSeen ? new Date(peer.lastSeen).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }) : "maintenant"}</dd></div>
+    </dl>
+  </article>`;
+}
+
+function renderPeerGraph(peers, state) {
+  if (!peers.length) return `<p class="empty-spaces">Aucun pair détecté.</p>`;
+  const center = { x: 50, y: 50 };
+  const nodes = peers.map((peer, index) => {
+    const self = peer.peerId === state?.identity?.peerId;
+    const angle = peers.length === 1 ? -Math.PI / 2 : (index / peers.length) * Math.PI * 2 - Math.PI / 2;
+    const radius = self ? 0 : 34;
+    return { peer, self, x: center.x + Math.cos(angle) * radius, y: center.y + Math.sin(angle) * radius };
+  });
+  const selfNode = nodes.find((node) => node.self) || nodes[0];
+  const links = nodes.filter((node) => node !== selfNode).map((node) => `<line x1="${selfNode.x}" y1="${selfNode.y}" x2="${node.x}" y2="${node.y}"></line>`).join("");
+  const renderedNodes = nodes.map((node) => `<g class="${node.self ? "is-self" : ""}" transform="translate(${node.x} ${node.y})">
+    <circle r="${node.self ? 9 : 7}"></circle>
+    <text y="18">${escapeHtml(peerInitials(node.peer))}</text>
+    <title>${escapeHtml(node.peer.displayName || node.peer.nickname || node.peer.peerId || "Pair")}</title>
+  </g>`).join("");
+  return `<div class="live-peer-graph" role="img" aria-label="Constellation des pairs connectés">
+    <svg viewBox="0 0 100 100" aria-hidden="true">${links}${renderedNodes}</svg>
+    <p>${peers.length} pair${peers.length > 1 ? "s" : ""} dans la room, dont votre identité locale.</p>
+  </div>`;
 }
 
 function renderMessage(message) {
@@ -360,6 +477,7 @@ function activityLabel(item) {
   if (item.type === "reaction") return `Réaction sur ${item.moduleTitle || "un échange"}`;
   if (item.type === "fragment.offer") return `Fragment proposé : ${item.moduleTitle || item.text || "fragment"}`;
   if (item.type === "fragment.receive") return `Fragment reçu : ${item.moduleTitle || item.text || "fragment"}`;
+  if (item.type === "fragment.cancel") return `Fragment refusé : ${item.moduleTitle || item.text || "fragment"}`;
   if (item.type === "ping") return item.text || "Ping";
   return item.text || "Message";
 }
@@ -399,11 +517,17 @@ function reactionCount(reactions, emoji) {
 }
 
 function renderOffer(offer) {
-  return `<button type="button" class="live-fragment-row" data-action="live-accept-offer" data-offer-id="${escapeAttribute(offer.offerId)}"><span>${icon("PackageOpen", 16)}</span><strong>${escapeHtml(offer.title)}</strong><small>${Math.ceil((offer.size || 0) / 1024)} Ko proposés</small></button>`;
+  return `<article class="live-fragment-decision">
+    <button type="button" class="live-fragment-row" data-action="live-accept-offer" data-offer-id="${escapeAttribute(offer.offerId)}"><span>${icon("PackageOpen", 16)}</span><strong>${escapeHtml(offer.title)}</strong><small>${Math.ceil((offer.size || 0) / 1024)} Ko proposés</small></button>
+    <button type="button" class="live-fragment-dismiss" data-action="live-decline-offer" data-offer-id="${escapeAttribute(offer.offerId)}">${icon("X", 15)} Refuser</button>
+  </article>`;
 }
 
 function renderReceived(fragment) {
-  return `<button type="button" class="live-fragment-row is-ready" data-action="live-import-received" data-offer-id="${escapeAttribute(fragment.offerId)}"><span>${icon("FileUp", 16)}</span><strong>${escapeHtml(fragment.title)}</strong><small>Importer localement</small></button>`;
+  return `<article class="live-fragment-decision">
+    <button type="button" class="live-fragment-row is-ready" data-action="live-import-received" data-offer-id="${escapeAttribute(fragment.offerId)}"><span>${icon("FileUp", 16)}</span><strong>${escapeHtml(fragment.title)}</strong><small>Importer localement</small></button>
+    <button type="button" class="live-fragment-dismiss" data-action="live-discard-received" data-offer-id="${escapeAttribute(fragment.offerId)}">${icon("X", 15)} Écarter</button>
+  </article>`;
 }
 
 function renderBlockedPeer(peerId) {
@@ -416,6 +540,16 @@ function escapeAttribute(value = "") {
 
 function reactionKey(reaction) {
   return `${reaction.from}:${reaction.targetId}:${reaction.emoji}`;
+}
+
+function shortPeerId(peerId = "") {
+  return peerId ? `${peerId.slice(0, 6)}…${peerId.slice(-4)}` : "local";
+}
+
+function peerInitials(peer = {}) {
+  const name = peer.displayName || peer.nickname || peer.peerId || "?";
+  const words = name.split(/[\s-]+/).filter(Boolean);
+  return (words.length > 1 ? `${words[0][0]}${words[1][0]}` : name.slice(0, 2)).toUpperCase();
 }
 
 function loadJson(key, fallback) {
