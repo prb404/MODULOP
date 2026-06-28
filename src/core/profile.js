@@ -64,6 +64,10 @@ export function createDefaultProfile() {
     atmospheres,
     activeAtmosphereId: "ink",
     morphology: morphologyState("modulop-v36"),
+    realtimeTraces: {
+      comments: [],
+      reactions: []
+    },
     credits: componentSources.map(({ id, source, author, concept, license, status, implementation }) => ({ id, source, author, concept, license, status, implementation })),
     updatedAt: new Date().toISOString(),
     uiPreferences: {

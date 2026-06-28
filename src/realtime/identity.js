@@ -43,6 +43,9 @@ export async function verifyEnvelope(envelope) {
 
 export function publicCardFromProfile(profile, identity, roomId) {
   const modules = Array.isArray(profile?.modules) ? profile.modules : [];
+  const traces = profile?.realtimeTraces || {};
+  const comments = Array.isArray(traces.comments) ? traces.comments : [];
+  const reactions = Array.isArray(traces.reactions) ? traces.reactions : [];
   return {
     peerId: identity.peerId,
     nickname: identity.nickname,
@@ -50,12 +53,26 @@ export function publicCardFromProfile(profile, identity, roomId) {
     avatar: profile?.identity?.avatar || null,
     roomId,
     moduleCount: modules.length,
+    traceCount: comments.length + reactions.length,
+    publicTraces: traceSummaries(comments, modules),
     publicFragments: modules.slice(0, 8).map((module) => ({
       id: module.id,
       type: module.type,
       title: module.title
     }))
   };
+}
+
+function traceSummaries(comments, modules) {
+  const byId = new Map(modules.map((module) => [module.id, module]));
+  return comments.slice(0, 6).map((comment) => {
+    const module = byId.get(comment.moduleId);
+    return {
+      moduleId: comment.moduleId,
+      moduleTitle: module?.title || comment.moduleId || "Fragment",
+      kind: "comment"
+    };
+  });
 }
 
 export async function hashJson(value) {

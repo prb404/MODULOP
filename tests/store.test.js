@@ -44,6 +44,8 @@ describe("persistance locale", () => {
     expect(legacy.template).toBe("custom");
     expect(legacy.uiPreferences.moduleActions.visibleShortcuts).toBe(1);
     expect(legacy.uiPreferences.panels.editor.edge).toBe("right");
+    expect(legacy.realtimeTraces.comments).toEqual([]);
+    expect(legacy.realtimeTraces.reactions).toEqual([]);
     expect(legacy.modules[0].layout.w).toBe(12);
     expect(legacy.modules[0].layout.h).toBe(5);
     expect(legacy.modules[0].presentation.rendererId).toBeTruthy();

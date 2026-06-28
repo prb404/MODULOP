@@ -96,6 +96,7 @@ describe("couche realtime P2P", () => {
     expect(html).toContain("live-peer-graph");
     expect(html).toContain("data-action=\"live-ping\"");
     expect(html).toContain("live-peer-card");
+    expect(html).toContain("Espace local verrouillé");
     expect(html).toContain("data-action=\"live-decline-offer\"");
     expect(html).toContain("data-action=\"live-discard-received\"");
     expect(html).toContain("Pair Atelier");

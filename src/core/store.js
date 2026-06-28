@@ -200,10 +200,14 @@ export function normalizeProfile(profile) {
   const before = JSON.stringify({
     template: profile.template,
     uiPreferences: profile.uiPreferences,
+    realtimeTraces: profile.realtimeTraces,
     moduleLayouts: profile.modules?.map((module) => [module.id, module.type, module.layout, module.presentation])
   });
   profile.template ||= "custom";
   profile.uiPreferences ||= {};
+  profile.realtimeTraces ||= {};
+  profile.realtimeTraces.comments = Array.isArray(profile.realtimeTraces.comments) ? profile.realtimeTraces.comments.filter(Boolean).slice(-240) : [];
+  profile.realtimeTraces.reactions = Array.isArray(profile.realtimeTraces.reactions) ? profile.realtimeTraces.reactions.filter(Boolean).slice(-400) : [];
   profile.uiPreferences.moduleActions ||= {};
   profile.uiPreferences.moduleActions.visibleShortcuts = clampNumber(profile.uiPreferences.moduleActions.visibleShortcuts, 1, 3, 1);
   profile.uiPreferences.panels ||= {};
@@ -216,6 +220,7 @@ export function normalizeProfile(profile) {
   const after = JSON.stringify({
     template: profile.template,
     uiPreferences: profile.uiPreferences,
+    realtimeTraces: profile.realtimeTraces,
     moduleLayouts: profile.modules?.map((module) => [module.id, module.type, module.layout, module.presentation])
   });
   return before !== after;

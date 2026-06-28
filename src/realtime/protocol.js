@@ -85,7 +85,15 @@ export function sanitizeCard(payload = {}) {
     avatar: sanitizeAvatar(payload.avatar),
     roomId: limit(payload.roomId, 120),
     moduleCount: clampInteger(payload.moduleCount, 0, 10000),
+    traceCount: clampInteger(payload.traceCount, 0, 10000),
     selectedModuleId: payload.selectedModuleId ? limit(payload.selectedModuleId, 80) : null,
+    publicTraces: Array.isArray(payload.publicTraces)
+      ? payload.publicTraces.slice(0, 8).map((item) => ({
+          moduleId: limit(item?.moduleId, 80),
+          moduleTitle: limit(item?.moduleTitle, MAX_TITLE),
+          kind: limit(item?.kind || "trace", 40)
+        }))
+      : [],
     publicFragments: Array.isArray(payload.publicFragments)
       ? payload.publicFragments.slice(0, 12).map((item) => ({
           id: limit(item?.id, 80),

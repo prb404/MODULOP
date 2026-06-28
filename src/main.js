@@ -52,6 +52,7 @@ class ModulopApp {
     this.realtime = new RealtimeController({
       getProfile: () => this.store.profile,
       importModule: (module, message) => this.insertModule(module, message),
+      persistTrace: (kind, detail) => this.persistRealtimeTrace(kind, detail),
       announce: (message) => this.announce(message)
     });
     this.realtimeState = this.realtime.snapshot();
@@ -79,11 +80,22 @@ class ModulopApp {
           <span class="profile-avatar" data-profile-avatar></span>
           <strong data-profile-name></strong>
         </button>
-        <button class="profile-header__live" type="button" data-action="open-live" data-live-badge aria-label="Ouvrir la coprésence"></button>
+        <button class="profile-header__live" type="button" data-action="open-live" data-live-badge aria-label="Ouvrir les présences"></button>
         <button class="profile-header__menu" type="button" data-action="open-menu" data-tooltip="Ouvrir le menu" aria-label="Ouvrir le menu">${icon("Menu")}</button>
       </header>
-      <main class="workspace"><section class="welcome-screen" data-home hidden></section><section class="blank-workspace" data-blank-workspace hidden></section><section class="module-grid" id="module-grid"></section></main>
+      <main class="workspace">
+        <section class="welcome-screen" data-home hidden></section>
+        <section class="workspace-presence-strip" data-presence-strip hidden></section>
+        <section class="blank-workspace" data-blank-workspace hidden></section>
+        <section class="module-grid" id="module-grid"></section>
+        <button class="workspace-add-fragment" type="button" data-action="open-library" data-workspace-add hidden>${icon("Plus", 18)}<span>Ajouter un fragment</span></button>
+      </main>
       <footer class="footer"><span>MODULOP ${appVersion.display}</span><button type="button" data-action="open-about">À propos</button></footer>
+      <nav class="mobile-tabbar" aria-label="Navigation mobile">
+        <button type="button" data-action="show-home">${icon("Compass", 19)}<span>Explorer</span></button>
+        <button type="button" data-action="open-library">${icon("LayoutGrid", 19)}<span>Fragments</span></button>
+        <button type="button" data-action="open-live">${icon("Share2", 19)}<span>Partager</span></button>
+      </nav>
       <div id="panel-host"></div>
       <div id="global-tooltip" class="tooltip" role="tooltip" hidden></div>
       <div class="toast" role="status" aria-live="polite"></div>
@@ -290,8 +302,11 @@ class ModulopApp {
       this.gridManager.endBatch();
       this.hasHydratedGrid = true;
     }
+    const workspaceAdd = this.root.querySelector("[data-workspace-add]");
+    if (workspaceAdd) workspaceAdd.hidden = this.homeVisible || !this.store.profile.modules.length;
     this.bindContentInteractions();
     bindTooltips(this.root);
+    this.renderRealtimeSurfaces();
   }
 
   async renderHome() {
@@ -718,7 +733,7 @@ class ModulopApp {
     const module = this.store.profile.modules.find((item) => item.id === this.selectedId);
     if (this.panel === "menu") this.panelManager.render({ type: "menu", title: "Réglages", eyebrow: "Profil local", body: this.menuBody(), className: "panel--menu" });
     if (this.panel === "live") {
-      this.panelManager.render({ type: "live", title: "Coprésence", eyebrow: "P2P éphémère", body: realtimePanelBody(this.realtimeState, this.store.profile.modules), className: "panel--live" });
+      this.panelManager.render({ type: "live", title: "Présences", eyebrow: "Traces éphémères", body: realtimePanelBody(this.realtimeState, this.store.profile.modules), className: "panel--live" });
       this.bindRealtimePanel();
     }
     if (this.panel === "library") this.panelManager.render({ type: "library", title: "Bibliothèque", eyebrow: "Ajouter un fragment", body: this.libraryBody(), className: "panel--library" });
@@ -775,6 +790,7 @@ class ModulopApp {
   renderRealtimeSurfaces() {
     const badge = this.root.querySelector("[data-live-badge]");
     if (badge) badge.innerHTML = realtimeBadge(this.realtimeState);
+    this.renderPresenceStrip();
     const selfId = this.realtimeState?.identity?.peerId;
     const byModule = new Map();
     for (const peer of this.realtimeState?.presence || []) {
@@ -786,21 +802,63 @@ class ModulopApp {
     for (const [moduleId, record] of this.renderedModules) {
       const peers = byModule.get(moduleId) || [];
       let marker = record.element.querySelector("[data-live-module-presence]");
+      const relation = moduleRelationSummary(moduleId, this.realtimeState);
+      let relationMarker = record.element.querySelector("[data-module-relations]");
       if (!peers.length) {
         marker?.remove();
         record.element.removeAttribute("data-live-count");
+      } else {
+        if (!marker) {
+          marker = document.createElement("div");
+          marker.className = "live-module-presence";
+          marker.dataset.liveModulePresence = "";
+          record.element.append(marker);
+        }
+        record.element.dataset.liveCount = String(peers.length);
+        marker.innerHTML = peers.slice(0, 4).map((peer) => `<span title="${escapeAttribute(peer.displayName || peer.nickname || "Présence")}">${visualPreview(peer.avatar)}</span>`).join("")
+          + (peers.length > 4 ? `<strong>+${peers.length - 4}</strong>` : "");
+      }
+      if (!relation.items.length) {
+        relationMarker?.remove();
+        record.element.removeAttribute("data-trace-count");
         continue;
       }
-      if (!marker) {
-        marker = document.createElement("div");
-        marker.className = "live-module-presence";
-        marker.dataset.liveModulePresence = "";
-        record.element.append(marker);
+      if (!relationMarker) {
+        relationMarker = document.createElement("div");
+        relationMarker.className = "module-relation-indicators";
+        relationMarker.dataset.moduleRelations = "";
+        record.element.append(relationMarker);
       }
-      record.element.dataset.liveCount = String(peers.length);
-      marker.innerHTML = peers.slice(0, 4).map((peer) => `<span title="${escapeAttribute(peer.displayName || peer.nickname || "Pair")}">${visualPreview(peer.avatar)}</span>`).join("")
-        + (peers.length > 4 ? `<strong>+${peers.length - 4}</strong>` : "");
+      record.element.dataset.traceCount = String(relation.traceCount);
+      relationMarker.innerHTML = relation.items.map((item) => `<span class="${item.tone}">${icon(item.icon, 12)}${escapeHtml(item.label)}</span>`).join("");
     }
+  }
+
+  renderPresenceStrip() {
+    const strip = this.root.querySelector("[data-presence-strip]");
+    if (!strip) return;
+    const modules = this.store.profile.modules || [];
+    strip.hidden = this.homeVisible || !modules.length;
+    if (strip.hidden) return;
+    const online = this.realtimeState?.status === "p2p";
+    const peers = this.realtimeState?.presence || [];
+    const remotePeers = peers.filter((peer) => peer.peerId !== this.realtimeState?.identity?.peerId);
+    const comments = this.realtimeState?.comments?.length || 0;
+    const reactions = this.realtimeState?.reactions?.length || 0;
+    const offers = (this.realtimeState?.offers?.length || 0) + (this.realtimeState?.receivedFragments?.length || 0);
+    strip.innerHTML = `
+      <button class="presence-strip__status" type="button" data-action="open-live">
+        <span class="live-dot ${online ? "is-online" : ""}"></span>
+        <strong>${online ? "Présences actives" : "Espace local"}</strong>
+        <small>${online ? `${Math.max(1, peers.length)} présent${peers.length > 1 ? "s" : ""}` : "verrouillé"}</small>
+      </button>
+      <button class="presence-strip__avatars" type="button" data-action="open-live" aria-label="Voir les présences">
+        ${(remotePeers.length ? remotePeers : peers).slice(0, 5).map((peer) => `<span title="${escapeAttribute(peer.displayName || peer.nickname || "Présence")}">${visualPreview(peer.avatar)}</span>`).join("") || `<span>${icon("UserRound", 14)}</span>`}
+      </button>
+      <button class="presence-strip__metric" type="button" data-action="open-live">${icon("MessageCircle", 14)}<span>${comments} trace${comments > 1 ? "s" : ""}</span></button>
+      <button class="presence-strip__metric" type="button" data-action="open-live">${icon("Smile", 14)}<span>${reactions}</span></button>
+      <button class="presence-strip__metric" type="button" data-action="open-live">${icon("PackageOpen", 14)}<span>${offers}</span></button>
+      <button class="presence-strip__invite" type="button" data-action="live-private-room">${icon("Link", 14)}<span>Lien privé</span></button>`;
   }
 
   bindRealtimePanel() {
@@ -846,7 +904,7 @@ class ModulopApp {
       <section class="menu-section"><div class="section-heading"><h3>Atmosphère</h3><button type="button" data-action="open-atmosphere">${icon("SlidersHorizontal", 15)} Personnaliser</button></div><div class="theme-grid">${this.store.profile.atmospheres.map((atmosphere) => `<button type="button" data-action="set-atmosphere" data-atmosphere="${atmosphere.id}" class="${this.store.profile.activeAtmosphereId === atmosphere.id ? "is-active" : ""}"><i class="theme-swatch" style="--swatch-bg:${atmosphere.colors.bg};--swatch-accent:${atmosphere.colors.accent}"></i>${escapeHtml(atmosphere.name)}</button>`).join("")}</div></section>
       <section class="menu-section"><h3>Vie privée</h3><div class="menu-list">
         <button type="button" data-action="open-consents">${icon("ShieldCheck", 18)}<span><strong>Consentements</strong><small>Services distants, embeds, images et métadonnées</small></span></button>
-        <button type="button" data-action="open-live">${icon("Radar", 18)}<span><strong>Coprésence P2P</strong><small>Présence, chat, ping et partage choisi de fragments</small></span></button>
+        <button type="button" data-action="open-live">${icon("Radar", 18)}<span><strong>Présences</strong><small>Traces, commentaires et fragments proposés</small></span></button>
       </div></section>
       <section class="menu-section"><h3>Données</h3><div class="data-actions">
         <button type="button" data-action="import">${fileBadge("IMPORT")}${icon("Upload", 18)}<span><strong>Importer</strong><small>Profil ou fragment MODULOP</small></span></button>
@@ -889,12 +947,28 @@ class ModulopApp {
   libraryBody() {
     const categories = [...new Set(moduleCatalog.map((item) => item.category))];
     const neighbors = this.insertionNeighbors();
+    const featured = moduleCatalog.find((item) => item.type === "gardner") || moduleCatalog[0];
     const context = this.pendingInsertion
       ? `<div class="insertion-context">${icon(directionIcon(this.pendingInsertion.direction), 17)}<span>Insertion ${insertionLabel(this.pendingInsertion.direction)}</span></div>`
       : "";
-    return `<label class="field catalog-search"><span>Rechercher</span><input type="search" placeholder="Test, collection, récit…" oninput="this.closest('.panel__body').querySelectorAll('.catalog-card,.neighbor-card').forEach(card=>card.hidden=!card.dataset.search.includes(this.value.toLowerCase()))"></label>
+    return `<section class="library-studio">
+      <header class="library-hero">
+        <div>
+          <span class="eyebrow">Fragments locaux</span>
+          <h3>Bibliothèque de fragments</h3>
+          <p>Composer l’espace avec des modules installés localement. Chaque ajout devient un fragment autonome, partageable ensuite si vous le choisissez.</p>
+        </div>
+        <span class="library-availability"><i></i>Disponible hors ligne</span>
+      </header>
+      <label class="field catalog-search"><span>Rechercher</span><input type="search" placeholder="Texte, constellation, questionnaire…" oninput="this.closest('.panel__body').querySelectorAll('.catalog-card,.neighbor-card').forEach(card=>card.hidden=!card.dataset.search.includes(this.value.toLowerCase()))"></label>
+      <nav class="catalog-filters" aria-label="Catégories de fragments">
+        <button type="button" class="is-active" onclick="this.closest('.panel__body').querySelector('.catalog-search input').value='';this.closest('.panel__body').querySelectorAll('.catalog-card,.neighbor-card').forEach(card=>card.hidden=false)">Tous</button>
+        ${categories.map((category) => `<button type="button" onclick="const root=this.closest('.panel__body');root.querySelectorAll('.catalog-card').forEach(card=>card.hidden=card.dataset.category!==this.dataset.category);root.querySelectorAll('.neighbor-card').forEach(card=>card.hidden=true)" data-category="${escapeAttribute(category)}">${escapeHtml(categoryLabel(category))}</button>`).join("")}
+      </nav>
       ${context}
-      ${neighbors.length ? `<section class="catalog-section neighbor-section"><h3>Dupliquer rapidement</h3><p>Reprendre le contenu et les dimensions d’un fragment voisin.</p><div class="neighbor-catalog">${neighbors.map((module) => {
+      <div class="library-layout">
+        <div class="library-catalog">
+          ${neighbors.length ? `<section class="catalog-section neighbor-section"><h3>Dupliquer rapidement</h3><p>Reprendre le contenu et les dimensions d’un fragment voisin.</p><div class="neighbor-catalog">${neighbors.map((module) => {
         const definition = moduleCatalog.find((item) => item.type === module.type);
         const layout = this.effectiveLayout(module);
         return `<button class="neighbor-card" type="button" data-action="duplicate-neighbor" data-source-id="${module.id}" data-search="${`${module.title} ${definition?.label || ""}`.toLowerCase()}">
@@ -902,8 +976,30 @@ class ModulopApp {
           <small>${layout.w} × ${layout.h}</small>${icon("CopyPlus", 15)}
         </button>`;
       }).join("")}</div></section>` : ""}
-      ${categories.map((category) => `<section class="catalog-section"><h3>${category}</h3><div class="catalog">${moduleCatalog.filter((item) => item.category === category).map((item) => `
-        <button class="catalog-card" type="button" data-action="add-module" data-type="${item.type}" data-search="${`${item.label} ${category}`.toLowerCase()}"><span>${icon(item.icon, 20)}</span><strong>${item.label}</strong>${icon("ArrowUpRight", 15)}</button>`).join("")}</div></section>`).join("")}`;
+          ${categories.map((category) => `<section class="catalog-section"><h3>${category}</h3><div class="catalog">${moduleCatalog.filter((item) => item.category === category).map((item) => `
+            <button class="catalog-card" type="button" data-action="add-module" data-type="${item.type}" data-category="${escapeAttribute(category)}" data-search="${`${item.label} ${category} ${moduleLibraryDescription(item)}`.toLowerCase()}">
+              <span class="catalog-card__icon">${icon(item.icon, 20)}</span>
+              <strong>${item.label}</strong>
+              <small>${escapeHtml(moduleLibraryDescription(item))}</small>
+              <em>${escapeHtml(categoryLabel(category))}</em>
+              <b>${item.layout?.[0] || 4}×${item.layout?.[1] || 4}</b>
+              ${icon("Plus", 15)}
+            </button>`).join("")}</div></section>`).join("")}
+        </div>
+        <aside class="library-detail">
+          <span class="library-detail__badge">${escapeHtml(categoryLabel(featured.category))}</span>
+          <div class="library-detail__preview">${icon(featured.icon, 42)}<i></i><i></i><i></i></div>
+          <h3>${escapeHtml(featured.label)}</h3>
+          <p>${escapeHtml(moduleLibraryLongDescription(featured))}</p>
+          <dl>
+            <div><dt>Données</dt><dd>Stockées dans le profil local</dd></div>
+            <div><dt>Rendus</dt><dd>Carte, grille, détail, export</dd></div>
+            <div><dt>Partage</dt><dd>Fragment proposé explicitement</dd></div>
+          </dl>
+          <button type="button" class="soft-button is-primary" data-action="add-module" data-type="${featured.type}">${icon("Plus", 16)} Ajouter au profil</button>
+        </aside>
+      </div>
+    </section>`;
   }
 
   insertionNeighbors() {
@@ -1361,6 +1457,25 @@ class ModulopApp {
     });
   }
 
+  persistRealtimeTrace(kind, detail = {}) {
+    this.store.mutate((profile) => {
+      profile.realtimeTraces ||= { comments: [], reactions: [] };
+      profile.realtimeTraces.comments ||= [];
+      profile.realtimeTraces.reactions ||= [];
+      if (kind === "comment" && detail.id) {
+        if (!profile.realtimeTraces.comments.some((comment) => comment.id === detail.id)) {
+          profile.realtimeTraces.comments = [cleanRealtimeTrace(detail), ...profile.realtimeTraces.comments].slice(0, 240);
+        }
+      }
+      if (kind === "reaction") {
+        const key = realtimeReactionKey(detail);
+        const existing = profile.realtimeTraces.reactions.findIndex((reaction) => realtimeReactionKey(reaction) === key);
+        if (existing >= 0) profile.realtimeTraces.reactions.splice(existing, 1);
+        else profile.realtimeTraces.reactions = [cleanRealtimeTrace(detail), ...profile.realtimeTraces.reactions].slice(0, 400);
+      }
+    }, { history: false });
+  }
+
   announce(message) {
     const toast = this.root.querySelector(".toast");
     clearTimeout(this.toastTimer);
@@ -1546,6 +1661,71 @@ function isPortableFile(file) {
 
 function isFragmentFile(file) {
   return Boolean(file?.name && /\.(modulop-fragment\.zip)$/i.test(file.name));
+}
+
+function cleanRealtimeTrace(detail = {}) {
+  return Object.fromEntries(Object.entries(detail).filter(([, value]) => value === null || ["string", "number", "boolean"].includes(typeof value)));
+}
+
+function realtimeReactionKey(reaction = {}) {
+  return `${reaction.from || "local"}:${reaction.targetId || ""}:${reaction.emoji || ""}`;
+}
+
+function moduleRelationSummary(moduleId, state = {}) {
+  const comments = (state.comments || []).filter((comment) => comment.moduleId === moduleId);
+  const reactions = (state.reactions || []).filter((reaction) => reaction.moduleId === moduleId);
+  const offers = (state.offers || []).filter((offer) => offer.moduleId === moduleId);
+  const received = (state.receivedFragments || []).filter((fragment) => fragment.moduleId === moduleId);
+  const activePeers = (state.presence || []).filter((peer) => peer.selectedModuleId === moduleId && peer.peerId !== state.identity?.peerId);
+  const items = [];
+  if (comments.length) items.push({ icon: "MessageCircle", label: String(comments.length), tone: "is-trace" });
+  if (reactions.length) items.push({ icon: "Smile", label: String(reactions.length), tone: "is-reaction" });
+  if (activePeers.length) items.push({ icon: "UsersRound", label: String(activePeers.length), tone: "is-presence" });
+  if (offers.length || received.length) items.push({ icon: "PackageOpen", label: String(offers.length + received.length), tone: "is-fragment" });
+  return { traceCount: comments.length + reactions.length, items };
+}
+
+function categoryLabel(category = "") {
+  if (category.includes("questionnaires")) return "Questionnaire";
+  if (category.includes("Collections")) return "Collection";
+  if (category.includes("Personnalisation")) return "Profil";
+  if (category.includes("médias")) return "Média";
+  if (category.includes("Parcours")) return "Parcours";
+  if (category.includes("Jeux")) return "Défi";
+  return "Contenu";
+}
+
+function moduleLibraryDescription(item = {}) {
+  const descriptions = {
+    "rich-text": "Écrire, annoter, publier",
+    "starter-pack": "Objets, symboles, collections",
+    constellation: "Cartographier des liens",
+    "portrait-chinois": "Révélateur créatif",
+    values: "Clarifier des arbitrages",
+    manual: "Mode d’emploi relationnel",
+    timeline: "Chronique personnelle",
+    "self-efficacy": "Confiance à agir",
+    "learner-efficacy": "Confiance à apprendre",
+    "collective-efficacy": "Confiance collective",
+    "collective-intelligence": "Dynamiques de groupe",
+    "sic-compact": "SICsIA synthétique",
+    "sic-long": "SICsIA recherche",
+    tpack: "Technologie, pédagogie, contenu",
+    personality: "Traits déclarés",
+    gardner: "Domaines d’engagement",
+    cognitive: "Logique et vitesse",
+    media: "Image ou média local",
+    "link-card": "Lien enrichi",
+    embed: "Outil externe embarqué"
+  };
+  return descriptions[item.type] || item.category || "Fragment local";
+}
+
+function moduleLibraryLongDescription(item = {}) {
+  if (item.type === "gardner") return "Ce module cartographie des affinités déclarées et des modes d’engagement. Il éclaire des fonctionnements sans produire de diagnostic.";
+  if (item.type === "rich-text") return "Un fragment d’écriture libre, idéal pour accueillir notes, intentions, récits et contenus éditoriaux exportables.";
+  if (item.type === "constellation") return "Une scène relationnelle pour relier objets, personnes, idées et traces dans une carte manipulable.";
+  return `${moduleLibraryDescription(item)}. Le fragment reste local tant que vous ne le proposez pas aux présences.`;
 }
 
 function fileBadge(label) {

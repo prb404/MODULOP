@@ -69,13 +69,13 @@ async function runRealtimeQa(browser) {
     await assertLiveHealthy(beta.page, "beta");
 
     const peerSeen = await waitForPeerDiscovery(alpha.page, beta.page);
-    const peerReport = peerSeen ? "Pairs detectes entre les deux contextes." : "Aucun pair distant detecte pendant la fenetre QA; UI et transport local verifies.";
+    const peerReport = peerSeen ? "Presences detectees entre les deux contextes." : "Aucune presence distante detectee pendant la fenetre QA; UI et transport local verifies.";
     await writeFile(join(qaDir, "peer-discovery.txt"), `${peerReport}\nroom=${roomId}\n`);
 
     await alpha.page.screenshot({ path: join(qaDir, "alpha-live.png"), fullPage: true });
     await beta.page.screenshot({ path: join(qaDir, "beta-live.png"), fullPage: true });
 
-    await alpha.page.locator("[data-action='live-private-room']").click();
+    await alpha.page.locator("#panel-host [data-action='live-private-room']").click();
     await assertVisible(alpha.page, ".live-invite-link input", "lien invitation privee");
     const invite = await alpha.page.locator(".live-invite-link input").inputValue();
     if (!/#room=.+&key=/.test(invite)) throw new Error(`Lien prive invalide: ${invite}`);
@@ -112,7 +112,7 @@ async function joinRoom(page, room) {
   await page.locator("[data-live-room]").fill(room);
   await page.locator("[data-action='live-join']").evaluate((button) => button.click());
   try {
-    await page.waitForFunction(() => document.querySelector(".profile-header__live")?.innerText.includes("Live P2P"), null, { timeout: 12000 });
+    await page.waitForFunction(() => document.querySelector(".profile-header__live")?.innerText.includes("Présences"), null, { timeout: 12000 });
     await page.waitForSelector(".live-peer", { timeout: 12000 });
   } catch (error) {
     const state = await page.evaluate(() => ({
@@ -171,12 +171,13 @@ async function assertLiveHealthy(page, label) {
   const state = await page.evaluate(() => ({
     status: document.querySelector("[data-live-badge]")?.innerText || "",
     panel: document.querySelector(".live-panel")?.innerText || "",
+    circle: document.querySelector("[data-live-room]")?.value || "",
     moduleCount: document.querySelectorAll(".module[data-load-state='ready']").length,
     livePeers: document.querySelectorAll(".live-peer").length,
     horizontalOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth
   }));
-  if (!state.status.includes("Live P2P")) throw new Error(`${label}: badge P2P absent\n${JSON.stringify(state, null, 2)}`);
-  if (!state.panel.includes(roomId)) throw new Error(`${label}: room absente du panneau Live\n${JSON.stringify(state, null, 2)}`);
+  if (!state.status.includes("Présences")) throw new Error(`${label}: badge Présences absent\n${JSON.stringify(state, null, 2)}`);
+  if (state.circle !== roomId) throw new Error(`${label}: cercle absent du panneau Présences\n${JSON.stringify(state, null, 2)}`);
   if (state.moduleCount < 1) throw new Error(`${label}: aucun fragment pret\n${JSON.stringify(state, null, 2)}`);
   if (state.livePeers < 1) throw new Error(`${label}: presence locale absente\n${JSON.stringify(state, null, 2)}`);
   if (state.horizontalOverflow > 4) throw new Error(`${label}: debordement horizontal ${state.horizontalOverflow}px`);
